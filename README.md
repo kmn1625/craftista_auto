@@ -134,5 +134,17 @@ ansible-playbook -i inventory.ini install-k8s.yaml
 * Helm/Argo makes multi-env deployments simple
 
 ---
+All Docker images for frontend, catalogue, voting, and recommendation will be built from the source code in:
+👉 https://github.com/kmn1625/craftista.git
+
+The GitLab CI/CD pipeline will:
+
+Clone that repo
+
+Build Docker images from each service directory
+
+Push to registry.gitlab.com/kmn1625/craftista_auto
+
+Kubernetes will pull these for deployment
 
 Maintained by: `Manjunath K`
