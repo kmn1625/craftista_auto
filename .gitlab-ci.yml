@@ -1,29 +1,36 @@
 # .gitlab-ci.yml
 
 stages:
+  - clone
   - build
   - push
   - deploy
 
 variables:
-  DOCKER_DRIVER: overlay2
   REGISTRY: registry.gitlab.com/kmn1625/craftista_auto
+  DOCKER_DRIVER: overlay2
   KUBE_CONFIG: /root/.kube/config
 
 before_script:
   - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin $CI_REGISTRY
 
-# 🔧 Build Docker Images
+clone_source:
+  stage: clone
+  image: alpine/git
+  script:
+    - git clone https://github.com/kmn1625/craftista.git source-code
+  artifacts:
+    paths:
+      - source-code
+
 build_frontend:
   stage: build
   image: docker:latest
   services:
     - docker:dind
   script:
-    - docker build -t $REGISTRY/frontend:latest ./frontend
-  artifacts:
-    paths:
-      - frontend
+    - cd source-code/frontend
+    - docker build -t $REGISTRY/frontend:latest .
 
 build_catalogue:
   stage: build
@@ -31,10 +38,8 @@ build_catalogue:
   services:
     - docker:dind
   script:
-    - docker build -t $REGISTRY/catalogue:latest ./catalogue
-  artifacts:
-    paths:
-      - catalogue
+    - cd source-code/catalogue
+    - docker build -t $REGISTRY/catalogue:latest .
 
 build_voting:
   stage: build
@@ -42,10 +47,10 @@ build_voting:
   services:
     - docker:dind
   script:
-    - docker build -t $REGISTRY/voting:latest ./voting
-  artifacts:
-    paths:
-      - voting
+    - cd source-code/voting
+    - chmod +x gradlew
+    - ./gradlew build --no-daemon
+    - docker build -t $REGISTRY/voting:latest .
 
 build_recommendation:
   stage: build
@@ -53,12 +58,9 @@ build_recommendation:
   services:
     - docker:dind
   script:
-    - docker build -t $REGISTRY/recommendation:latest ./recommendation
-  artifacts:
-    paths:
-      - recommendation
+    - cd source-code/recommendation
+    - docker build -t $REGISTRY/recommendation:latest .
 
-# 🚀 Push Images to GitLab Registry
 push_images:
   stage: push
   image: docker:latest
@@ -70,8 +72,7 @@ push_images:
     - docker push $REGISTRY/voting:latest
     - docker push $REGISTRY/recommendation:latest
 
-# 🚢 Deploy to Kubernetes
-k8s_deploy:
+deploy_to_k8s:
   stage: deploy
   image:
     name: bitnami/kubectl:latest
