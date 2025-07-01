@@ -1,0 +1,85 @@
+# .gitlab-ci.yml
+
+stages:
+  - build
+  - push
+  - deploy
+
+variables:
+  DOCKER_DRIVER: overlay2
+  REGISTRY: registry.gitlab.com/kmn1625/craftista_auto
+  KUBE_CONFIG: /root/.kube/config
+
+before_script:
+  - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin $CI_REGISTRY
+
+# 🔧 Build Docker Images
+build_frontend:
+  stage: build
+  image: docker:latest
+  services:
+    - docker:dind
+  script:
+    - docker build -t $REGISTRY/frontend:latest ./frontend
+  artifacts:
+    paths:
+      - frontend
+
+build_catalogue:
+  stage: build
+  image: docker:latest
+  services:
+    - docker:dind
+  script:
+    - docker build -t $REGISTRY/catalogue:latest ./catalogue
+  artifacts:
+    paths:
+      - catalogue
+
+build_voting:
+  stage: build
+  image: docker:latest
+  services:
+    - docker:dind
+  script:
+    - docker build -t $REGISTRY/voting:latest ./voting
+  artifacts:
+    paths:
+      - voting
+
+build_recommendation:
+  stage: build
+  image: docker:latest
+  services:
+    - docker:dind
+  script:
+    - docker build -t $REGISTRY/recommendation:latest ./recommendation
+  artifacts:
+    paths:
+      - recommendation
+
+# 🚀 Push Images to GitLab Registry
+push_images:
+  stage: push
+  image: docker:latest
+  services:
+    - docker:dind
+  script:
+    - docker push $REGISTRY/frontend:latest
+    - docker push $REGISTRY/catalogue:latest
+    - docker push $REGISTRY/voting:latest
+    - docker push $REGISTRY/recommendation:latest
+
+# 🚢 Deploy to Kubernetes
+k8s_deploy:
+  stage: deploy
+  image:
+    name: bitnami/kubectl:latest
+    entrypoint: ['']
+  script:
+    - mkdir -p ~/.kube
+    - echo "$KUBECONFIG_DATA" | base64 -d > ~/.kube/config
+    - kubectl apply -f k8s-manifests/frontend.yaml
+    - kubectl apply -f k8s-manifests/catalogue.yaml
+    - kubectl apply -f k8s-manifests/voting.yaml
+    - kubectl apply -f k8s-manifests/recommendation.yaml
