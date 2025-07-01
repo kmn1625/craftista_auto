@@ -1,0 +1,13 @@
+#cloud-config
+packages:
+  - docker.io
+  - apt-transport-https
+  - ca-certificates
+  - curl
+  - software-properties-common
+runcmd:
+  - curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add -
+  - add-apt-repository "deb http://apt.kubernetes.io/ kubernetes-xenial main"
+  - apt-get update && apt-get install -y kubelet kubeadm kubectl
+  - systemctl enable docker && systemctl start docker
+  - [ placeholder for kubeadm join command ]
