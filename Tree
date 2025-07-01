@@ -1,17 +1,57 @@
-infra/
-├── main.tf                  # Entry Terraform file for providers, SSH, VPC
-├── network.tf              # VPC, Subnet, IGW, Routing, Security Group
-├── ssh_key.tf              # SSH key generation using TLS provider
-├── masters.tf              # EC2 resource for 2 master nodes
-├── workers.tf              # EC2 resource for 3 worker nodes
-├── variables.tf            # Input variables for instance type, region, AMI
-├── outputs.tf              # Outputs master and worker public IPs
-├── cloud-init/
-│   ├── master.yaml         # cloud-init bootstrap for K8s master node
-│   └── worker.yaml         # cloud-init bootstrap for K8s worker node
-├── ansible/
-│   ├── inventory.ini       # Hosts inventory for Ansible
-│   ├── install-k8s.yaml    # Ansible playbook for K8s install (optional)
-│   └── group_vars/
-│       └── all.yml         # Optional: define shared vars here
-└── k8s-auto-key.pem        # Auto-generated private key for SSH access
+craftista_auto/
+│
+├── .gitlab-ci.yml                # CI/CD pipeline for build + deploy
+├── README.md                     # Project overview & steps
+│
+├── docker-compose.yaml           # For local development (optional)
+│
+├── infra/                        # Step 1-2: Infra provisioning + K8s setup
+│   ├── main.tf
+│   ├── network.tf
+│   ├── ssh_key.tf
+│   ├── masters.tf
+│   ├── workers.tf
+│   ├── variables.tf
+│   ├── outputs.tf
+│   ├── cloud-init/
+│   │   ├── master.yaml
+│   │   └── worker.yaml
+│   └── ansible/
+│       ├── inventory.ini
+│       └── install-k8s.yaml
+│
+├── k8s-manifests/                # Step 5: K8s raw YAML files for each service
+│   ├── frontend.yaml
+│   ├── catalogue.yaml
+│   ├── voting.yaml
+│   └── recommendation.yaml
+│
+├── helm-charts/                  # Step 6: Helm chart templates (optional)
+│   └── craftista/
+│       ├── Chart.yaml
+│       ├── values.yaml
+│       └── templates/
+│           ├── frontend-deploy.yaml
+│           ├── catalogue-deploy.yaml
+│           ├── voting-deploy.yaml
+│           └── recommendation-deploy.yaml
+│
+├── frontend/                     # Service 1 - Frontend
+│   ├── Dockerfile
+│   └── src/...
+│
+├── catalogue/                    # Service 2 - Catalogue
+│   ├── Dockerfile
+│   └── app/...
+│
+├── voting/                       # Service 3 - Voting
+│   ├── Dockerfile
+│   └── src/...
+│
+├── recommendation/              # Service 4 - Recommendation
+│   ├── Dockerfile
+│   └── go/...
+│
+└── scripts/                      # Utility (optional: CI helpers, bootstrap scripts)
+    ├── gen-kubeconfig.sh
+    └── cleanup.sh
