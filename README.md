@@ -147,4 +147,12 @@ Push to registry.gitlab.com/kmn1625/craftista_auto
 
 Kubernetes will pull these for deployment
 
+🔐 Secrets Needed in GitLab CI/CD:
+
+CI_REGISTRY_USER: Your GitLab username
+
+CI_REGISTRY_PASSWORD: GitLab personal access token
+
+KUBECONFIG_DATA: Base64 encoded kubeconfig file for deployment
+
 Maintained by: `Manjunath K`
