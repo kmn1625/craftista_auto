@@ -1,0 +1,17 @@
+infra/
+├── main.tf                  # Entry Terraform file for providers, SSH, VPC
+├── network.tf              # VPC, Subnet, IGW, Routing, Security Group
+├── ssh_key.tf              # SSH key generation using TLS provider
+├── masters.tf              # EC2 resource for 2 master nodes
+├── workers.tf              # EC2 resource for 3 worker nodes
+├── variables.tf            # Input variables for instance type, region, AMI
+├── outputs.tf              # Outputs master and worker public IPs
+├── cloud-init/
+│   ├── master.yaml         # cloud-init bootstrap for K8s master node
+│   └── worker.yaml         # cloud-init bootstrap for K8s worker node
+├── ansible/
+│   ├── inventory.ini       # Hosts inventory for Ansible
+│   ├── install-k8s.yaml    # Ansible playbook for K8s install (optional)
+│   └── group_vars/
+│       └── all.yml         # Optional: define shared vars here
+└── k8s-auto-key.pem        # Auto-generated private key for SSH access
