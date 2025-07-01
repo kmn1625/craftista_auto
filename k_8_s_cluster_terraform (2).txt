@@ -1,0 +1,77 @@
+[...OMITTED FOR BREVITY: Terraform configuration remains unchanged...]
+
+# cloud-init/master.yaml should be stored in a separate file: cloud-init/master.yaml
+#cloud-config
+packages:
+  - docker.io
+  - apt-transport-https
+  - ca-certificates
+  - curl
+  - software-properties-common
+runcmd:
+  - curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add -
+  - add-apt-repository "deb http://apt.kubernetes.io/ kubernetes-xenial main"
+  - apt-get update && apt-get install -y kubelet kubeadm kubectl
+  - systemctl enable docker && systemctl start docker
+  - kubeadm init --pod-network-cidr=10.244.0.0/16
+  - mkdir -p /home/ubuntu/.kube
+  - cp /etc/kubernetes/admin.conf /home/ubuntu/.kube/config
+  - chown ubuntu:ubuntu /home/ubuntu/.kube/config
+  - su - ubuntu -c "kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml"
+
+# cloud-init/worker.yaml should be stored in a separate file: cloud-init/worker.yaml
+#cloud-config
+packages:
+  - docker.io
+  - apt-transport-https
+  - ca-certificates
+  - curl
+  - software-properties-common
+runcmd:
+  - curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add -
+  - add-apt-repository "deb http://apt.kubernetes.io/ kubernetes-xenial main"
+  - apt-get update && apt-get install -y kubelet kubeadm kubectl
+  - systemctl enable docker && systemctl start docker
+  - [ placeholder for kubeadm join command ]
+
+# ansible/install-k8s.yaml should be stored as a separate Ansible playbook file in ansible/install-k8s.yaml
+- name: Install Kubernetes Components
+  hosts: all
+  become: yes
+  tasks:
+    - name: Install required packages
+      apt:
+        name: [ 'docker.io', 'apt-transport-https', 'ca-certificates', 'curl', 'software-properties-common' ]
+        state: present
+        update_cache: yes
+
+    - name: Add Kubernetes APT key and repository
+      shell: |
+        curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add -
+        echo "deb http://apt.kubernetes.io/ kubernetes-xenial main" > /etc/apt/sources.list.d/kubernetes.list
+        apt-get update
+
+    - name: Install Kubernetes tools
+      apt:
+        name: [ 'kubelet', 'kubeadm', 'kubectl' ]
+        state: present
+
+    - name: Enable and start Docker
+      systemd:
+        name: docker
+        enabled: yes
+        state: started
+
+# ansible/inventory.ini should be stored in its own file for Ansible
+[masters]
+master-1 ansible_host=<public_ip_1> ansible_user=ubuntu
+master-2 ansible_host=<public_ip_2> ansible_user=ubuntu
+
+[workers]
+worker-1 ansible_host=<public_ip_3> ansible_user=ubuntu
+worker-2 ansible_host=<public_ip_4> ansible_user=ubuntu
+worker-3 ansible_host=<public_ip_5> ansible_user=ubuntu
+
+[all:vars]
+ansible_ssh_private_key_file=../k8s-auto-key.pem
+ansible_python_interpreter=/usr/bin/python3

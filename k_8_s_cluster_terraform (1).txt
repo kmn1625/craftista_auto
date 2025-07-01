@@ -1,0 +1,235 @@
+terraform {
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = ">= 4.0"
+    }
+    tls = {
+      source  = "hashicorp/tls"
+    }
+  }
+
+  required_version = ">= 1.3"
+}
+
+provider "aws" {
+  region = var.aws_region
+}
+
+# Generate SSH key pair
+resource "tls_private_key" "k8s_key" {
+  algorithm = "RSA"
+  rsa_bits  = 4096
+}
+
+resource "aws_key_pair" "k8s_key" {
+  key_name   = "k8s-auto-key"
+  public_key = tls_private_key.k8s_key.public_key_openssh
+}
+
+resource "local_file" "private_key" {
+  content  = tls_private_key.k8s_key.private_key_pem
+  filename = "k8s-auto-key.pem"
+  file_permission = "0600"
+}
+
+# Networking
+resource "aws_vpc" "main" {
+  cidr_block = "10.0.0.0/16"
+}
+
+resource "aws_subnet" "main" {
+  vpc_id     = aws_vpc.main.id
+  cidr_block = "10.0.1.0/24"
+}
+
+resource "aws_internet_gateway" "gw" {
+  vpc_id = aws_vpc.main.id
+}
+
+resource "aws_route_table" "rt" {
+  vpc_id = aws_vpc.main.id
+}
+
+resource "aws_route" "internet_access" {
+  route_table_id         = aws_route_table.rt.id
+  destination_cidr_block = "0.0.0.0/0"
+  gateway_id             = aws_internet_gateway.gw.id
+}
+
+resource "aws_route_table_association" "a" {
+  subnet_id      = aws_subnet.main.id
+  route_table_id = aws_route_table.rt.id
+}
+
+resource "aws_security_group" "k8s_sg" {
+  name        = "k8s-sg"
+  description = "Allow Kubernetes communication"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    from_port   = 6443
+    to_port     = 6443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    from_port   = 30000
+    to_port     = 32767
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    from_port   = 10250
+    to_port     = 10250
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+# EC2 Instances - Masters
+resource "aws_instance" "master" {
+  count         = 2
+  ami           = var.ubuntu_ami
+  instance_type = var.instance_type
+  subnet_id     = aws_subnet.main.id
+  key_name      = aws_key_pair.k8s_key.key_name
+  vpc_security_group_ids = [aws_security_group.k8s_sg.id]
+
+  user_data = file("cloud-init/master.yaml")
+
+  tags = {
+    Name = "k8s-master-${count.index + 1}"
+    Role = "master"
+  }
+}
+
+# EC2 Instances - Workers
+resource "aws_instance" "worker" {
+  count         = 3
+  ami           = var.ubuntu_ami
+  instance_type = var.instance_type
+  subnet_id     = aws_subnet.main.id
+  key_name      = aws_key_pair.k8s_key.key_name
+  vpc_security_group_ids = [aws_security_group.k8s_sg.id]
+
+  user_data = file("cloud-init/worker.yaml")
+
+  tags = {
+    Name = "k8s-worker-${count.index + 1}"
+    Role = "worker"
+  }
+}
+
+output "master_ips" {
+  value = aws_instance.master[*].public_ip
+}
+
+output "worker_ips" {
+  value = aws_instance.worker[*].public_ip
+}
+
+variable "aws_region" {
+  default = "us-east-1"
+}
+
+variable "instance_type" {
+  default = "t3.medium"
+}
+
+variable "ubuntu_ami" {
+  # Ubuntu 22.04 LTS AMI ID for us-east-1 (replace if region changes)
+  default = "ami-053b0d53c279acc90"
+}
+
+# cloud-init/master.yaml
+#cloud-config
+packages:
+  - docker.io
+  - apt-transport-https
+  - ca-certificates
+  - curl
+  - software-properties-common
+runcmd:
+  - curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add -
+  - add-apt-repository "deb http://apt.kubernetes.io/ kubernetes-xenial main"
+  - apt-get update && apt-get install -y kubelet kubeadm kubectl
+  - systemctl enable docker && systemctl start docker
+  - kubeadm init --pod-network-cidr=10.244.0.0/16
+  - mkdir -p /home/ubuntu/.kube
+  - cp /etc/kubernetes/admin.conf /home/ubuntu/.kube/config
+  - chown ubuntu:ubuntu /home/ubuntu/.kube/config
+  - su - ubuntu -c "kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml"
+
+# cloud-init/worker.yaml
+#cloud-config
+packages:
+  - docker.io
+  - apt-transport-https
+  - ca-certificates
+  - curl
+  - software-properties-common
+runcmd:
+  - curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add -
+  - add-apt-repository "deb http://apt.kubernetes.io/ kubernetes-xenial main"
+  - apt-get update && apt-get install -y kubelet kubeadm kubectl
+  - systemctl enable docker && systemctl start docker
+  - [ placeholder for kubeadm join command ]
+
+# ansible/install-k8s.yaml
+- name: Install Kubernetes Components
+  hosts: all
+  become: yes
+  tasks:
+    - name: Install required packages
+      apt:
+        name: [ 'docker.io', 'apt-transport-https', 'ca-certificates', 'curl', 'software-properties-common' ]
+        state: present
+        update_cache: yes
+
+    - name: Add Kubernetes APT key and repository
+      shell: |
+        curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add -
+        echo "deb http://apt.kubernetes.io/ kubernetes-xenial main" > /etc/apt/sources.list.d/kubernetes.list
+        apt-get update
+
+    - name: Install Kubernetes tools
+      apt:
+        name: [ 'kubelet', 'kubeadm', 'kubectl' ]
+        state: present
+
+    - name: Enable and start Docker
+      systemd:
+        name: docker
+        enabled: yes
+        state: started
+
+# ansible/inventory.ini
+[masters]
+master-1 ansible_host=<public_ip_1> ansible_user=ubuntu
+master-2 ansible_host=<public_ip_2> ansible_user=ubuntu
+
+[workers]
+worker-1 ansible_host=<public_ip_3> ansible_user=ubuntu
+worker-2 ansible_host=<public_ip_4> ansible_user=ubuntu
+worker-3 ansible_host=<public_ip_5> ansible_user=ubuntu
+
+[all:vars]
+ansible_ssh_private_key_file=../k8s-auto-key.pem
+ansible_python_interpreter=/usr/bin/python3
