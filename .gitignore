@@ -1,0 +1,26 @@
+# === Terraform ===
+.terraform/
+terraform.tfstate
+terraform.tfstate.backup
+*.tfvars
+
+# === SSH Key Files ===
+*.pem
+
+# === Logs / Crash Dumps ===
+crash.log
+
+# === Kubernetes Config ===
+.kube/
+*.kubeconfig
+
+# === Editor/IDE Specific ===
+*.swp
+.DS_Store
+.idea/
+.vscode/
+*.log
+
+# === Helm / Kubernetes Generated Files ===
+*.tgz
+charts/
