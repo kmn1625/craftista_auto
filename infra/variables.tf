@@ -9,7 +9,7 @@ variable "aws_region" {
 variable "instance_type" {
   description = "The type of EC2 instance to use"
   type        = string
-  default     = "t3.medium"
+  default     = "t2.medium"
 }
 
 variable "ubuntu_ami" {
