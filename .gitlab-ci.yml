@@ -7,12 +7,12 @@ stages:
   - deploy
 
 variables:
-  REGISTRY: registry.gitlab.com/kmn1625/craftista_auto
+  REGISTRY: kmn1624/craftista
   DOCKER_DRIVER: overlay2
   KUBE_CONFIG: /root/.kube/config
 
 before_script:
-  - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin $CI_REGISTRY
+  - echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
 
 clone_source:
   stage: clone
@@ -30,7 +30,7 @@ build_frontend:
     - docker:dind
   script:
     - cd source-code/frontend
-    - docker build -t $REGISTRY/frontend:latest .
+    - docker build -t $REGISTRY-frontend:latest .
 
 build_catalogue:
   stage: build
@@ -39,7 +39,7 @@ build_catalogue:
     - docker:dind
   script:
     - cd source-code/catalogue
-    - docker build -t $REGISTRY/catalogue:latest .
+    - docker build -t $REGISTRY-catalogue:latest .
 
 build_voting:
   stage: build
@@ -50,7 +50,7 @@ build_voting:
     - cd source-code/voting
     - chmod +x gradlew
     - ./gradlew build --no-daemon
-    - docker build -t $REGISTRY/voting:latest .
+    - docker build -t $REGISTRY-voting:latest .
 
 build_recommendation:
   stage: build
@@ -59,7 +59,7 @@ build_recommendation:
     - docker:dind
   script:
     - cd source-code/recommendation
-    - docker build -t $REGISTRY/recommendation:latest .
+    - docker build -t $REGISTRY-recommendation:latest .
 
 push_images:
   stage: push
@@ -67,16 +67,16 @@ push_images:
   services:
     - docker:dind
   script:
-    - docker push $REGISTRY/frontend:latest
-    - docker push $REGISTRY/catalogue:latest
-    - docker push $REGISTRY/voting:latest
-    - docker push $REGISTRY/recommendation:latest
+    - docker push $REGISTRY-frontend:latest
+    - docker push $REGISTRY-catalogue:latest
+    - docker push $REGISTRY-voting:latest
+    - docker push $REGISTRY-recommendation:latest
 
 deploy_to_k8s:
   stage: deploy
   image:
     name: bitnami/kubectl:latest
-    entrypoint: ['']
+    entrypoint: [""]
   script:
     - mkdir -p ~/.kube
     - echo "$KUBECONFIG_DATA" | base64 -d > ~/.kube/config
