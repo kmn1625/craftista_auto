@@ -18,7 +18,7 @@ clone_source:
   stage: clone
   image: alpine/git
   script:
-    - git clone https://github.com/kmn1625/craftista.git source-code
+    - git clone https://github.com/kmn1625/craftista_auto.git source-code
   artifacts:
     paths:
       - source-code
