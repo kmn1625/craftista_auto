@@ -66,7 +66,7 @@ jobs:
 
       - name: Build and Push Catalogue
         run: |
-          docker build -t $REGISTRY:catalogue-latest ./source-code/catalogue
+          docker build -t $REGISTRY:catalogue-latest ./catalogue
           docker push $REGISTRY:catalogue-latest
 
       - name: Build and Push Voting
@@ -75,12 +75,12 @@ jobs:
           chmod +x gradlew
           ./gradlew build --no-daemon
           cd ../..
-          docker build -t $REGISTRY:voting-latest ./source-code/voting
+          docker build -t $REGISTRY:voting-latest ./voting
           docker push $REGISTRY:voting-latest
 
       - name: Build and Push Recommendation
         run: |
-          docker build -t $REGISTRY:recommendation-latest ./source-code/recommendation
+          docker build -t $REGISTRY:recommendation-latest ./recommendation
           docker push $REGISTRY:recommendation-latest
 
   deploy_to_k8s:
