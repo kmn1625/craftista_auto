@@ -7,6 +7,10 @@ resource "tls_private_key" "k8s_key" {
 resource "aws_key_pair" "k8s_key" {
   key_name   = "k8s-auto-key"
   public_key = tls_private_key.k8s_key.public_key_openssh
+  
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 resource "local_file" "private_key" {
@@ -14,3 +18,4 @@ resource "local_file" "private_key" {
   filename = "k8s-auto-key.pem"
   file_permission = "0600"
 }
+
