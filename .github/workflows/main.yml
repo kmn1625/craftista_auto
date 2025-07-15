@@ -71,10 +71,6 @@ jobs:
 
       - name: Build and Push Voting
         run: |
-          cd source-code/voting
-          chmod +x gradlew
-          ./gradlew build --no-daemon
-          cd ../..
           docker build -t $REGISTRY:voting-latest ./voting
           docker push $REGISTRY:voting-latest
 
