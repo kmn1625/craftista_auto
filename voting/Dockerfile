@@ -1,7 +1,17 @@
-# voting/Dockerfile
-FROM openjdk:17-jdk-slim
-WORKDIR /app
+FROM gradle:8.4.0-jdk17 AS builder
+
+WORKDIR /home/app
+
 COPY . .
-RUN ./gradlew build --no-daemon
+
+RUN gradle build --no-daemon
+
+FROM eclipse-temurin:17-jre
+
+WORKDIR /app
+
+COPY --from=builder /home/app/build/libs/*.jar app.jar
+
 EXPOSE 8080
-CMD ["java", "-jar", "build/libs/voting-0.0.1-SNAPSHOT.jar"]
+
+CMD ["java", "-jar", "app.jar"]
