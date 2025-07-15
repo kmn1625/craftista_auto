@@ -1,7 +1,7 @@
 # workers.tf
 
 resource "aws_instance" "worker" {
-  count                       = 3
+  count                       = 2
   ami                         = var.ubuntu_ami
   instance_type               = var.instance_type
   subnet_id                   = aws_subnet.main.id
