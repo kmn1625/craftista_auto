@@ -61,7 +61,7 @@ jobs:
 
       - name: Build and Push Frontend
         run: |
-          docker build -t $REGISTRY:frontend-latest ./source-code/frontend
+          docker build -t $REGISTRY:frontend-latest ./frontend
           docker push $REGISTRY:frontend-latest
 
       - name: Build and Push Catalogue
