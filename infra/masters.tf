@@ -1,7 +1,7 @@
 # masters.tf
 
 resource "aws_instance" "master" {
-  count                       = 2
+  count                       = 1
   ami                         = var.ubuntu_ami
   instance_type               = var.instance_type
   subnet_id                   = aws_subnet.main.id
