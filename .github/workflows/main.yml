@@ -16,10 +16,11 @@ jobs:
     steps:
       - name: Checkout repo
         uses: actions/checkout@v3
+
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v2
         with:
-          terraform_version: 1.6.6   # or whatever version you want
+          terraform_version: 1.6.6
 
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v2
@@ -28,11 +29,16 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: Terraform Init & Apply
+      - name: Cleanup old infra (optional destroy)
         run: |
           cd infra/
           terraform init
           terraform destroy -auto-approve || true
+        continue-on-error: true  # Prevent pipeline failure on destroy
+
+      - name: Terraform Apply
+        run: |
+          cd infra/
           terraform apply -auto-approve
 
   docker_build_push:
@@ -50,18 +56,18 @@ jobs:
       - name: Clone Microservices Repo
         run: git clone https://github.com/kmn1625/craftista.git source-code
 
-      - name: Docker login
+      - name: Docker Login to Docker Hub
         run: echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
 
       - name: Build and Push Frontend
         run: |
-          docker build -t $REGISTRY-frontend:latest ./source-code/frontend
-          docker push $REGISTRY-frontend:latest
+          docker build -t $REGISTRY:frontend-latest ./source-code/frontend
+          docker push $REGISTRY:frontend-latest
 
       - name: Build and Push Catalogue
         run: |
-          docker build -t $REGISTRY-catalogue:latest ./source-code/catalogue
-          docker push $REGISTRY-catalogue:latest
+          docker build -t $REGISTRY:catalogue-latest ./source-code/catalogue
+          docker push $REGISTRY:catalogue-latest
 
       - name: Build and Push Voting
         run: |
@@ -69,13 +75,13 @@ jobs:
           chmod +x gradlew
           ./gradlew build --no-daemon
           cd ../..
-          docker build -t $REGISTRY-voting:latest ./source-code/voting
-          docker push $REGISTRY-voting:latest
+          docker build -t $REGISTRY:voting-latest ./source-code/voting
+          docker push $REGISTRY:voting-latest
 
       - name: Build and Push Recommendation
         run: |
-          docker build -t $REGISTRY-recommendation:latest ./source-code/recommendation
-          docker push $REGISTRY-recommendation:latest
+          docker build -t $REGISTRY:recommendation-latest ./source-code/recommendation
+          docker push $REGISTRY:recommendation-latest
 
   deploy_to_k8s:
     name: "Deploy to Kubernetes"
