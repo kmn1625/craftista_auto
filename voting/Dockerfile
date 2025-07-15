@@ -1,17 +1,14 @@
-FROM gradle:8.4.0-jdk17 AS builder
+# syntax=docker/dockerfile:1
 
-WORKDIR /home/app
-
-COPY . .
-
-RUN gradle build --no-daemon
-
-FROM eclipse-temurin:17-jre
-
+# Build stage
+FROM maven:3.9.4-eclipse-temurin-17 AS builder
 WORKDIR /app
+COPY . .
+RUN mvn clean package -DskipTests
 
-COPY --from=builder /home/app/build/libs/*.jar app.jar
-
+# Runtime stage
+FROM eclipse-temurin:17-jre
+WORKDIR /app
+COPY --from=builder /app/target/*.jar app.jar
 EXPOSE 8080
-
 CMD ["java", "-jar", "app.jar"]
