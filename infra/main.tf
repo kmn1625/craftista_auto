@@ -1,5 +1,5 @@
 provider "aws" {
-  region = us-east-1
+  region = "us-east-1"
 }
 
 resource "tls_private_key" "k8s_key" {
