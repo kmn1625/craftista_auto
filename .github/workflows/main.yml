@@ -38,7 +38,7 @@ jobs:
 
       - name: Terraform Apply
         run: |
-          cd terraform/
+          cd infra
           terraform init
           terraform apply -auto-approve
 
@@ -46,16 +46,13 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ssh-key
-          path: terraform/k8s-key.pem
-
-      - name: Show Instance IPs
-        run: cat terraform/instance_ips.txt
+          path: infra/k8s-key.pem
 
       - name: Upload Instance IPs
         uses: actions/upload-artifact@v4
         with:
           name: instance-ips
-          path: terraform/instance_ips.txt
+          path: infra/instance_ips.txt
 
   docker_build_push:
     name: "Build and Push Docker Images"
@@ -118,4 +115,8 @@ jobs:
       - name: Install Kubernetes on Cluster
         run: |
           MASTER_IP=$(head -n 1 instance_ips.txt)
-          ssh -i ~/.ssh/k8s-key.pem ubuntu@$MASTER_IP 'bash -_
+          ssh -i ~/.ssh/k8s-key.pem ubuntu@$MASTER_IP 'bash -s' < ./infra/kube-install.sh
+
+      - name: Deploy All Microservices
+        run: |
+          kubectl apply -f k8s-manifests/
