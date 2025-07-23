@@ -1,73 +1,101 @@
 provider "aws" {
-  region = "ap-south-1"
+  region = var.region
 }
 
-# --------------------------
-# SSH Key Pair (Dynamic)
-# --------------------------
-resource "tls_private_key" "ssh_key" {
+# Generate SSH Key Pair Locally
+resource "tls_private_key" "k8s" {
   algorithm = "RSA"
   rsa_bits  = 4096
 }
 
+# Create Key Pair in AWS
 resource "aws_key_pair" "k8s_key" {
   key_name   = "k8s-key"
-  public_key = tls_private_key.ssh_key.public_key_openssh
-}
+  public_key = tls_private_key.k8s.public_key_openssh
 
-# --------------------------
-# Ubuntu AMI
-# --------------------------
-data "aws_ami" "ubuntu" {
-  most_recent = true
-  owners      = ["099720109477"] # Canonical
-
-  filter {
-    name   = "name"
-    values = ["ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"]
+  lifecycle {
+    prevent_destroy = false
   }
 }
 
-# --------------------------
-# Instances: 1 Master, 2 Workers
-# --------------------------
+# Save Private Key Locally for GitHub Artifact
+resource "local_file" "private_key" {
+  content  = tls_private_key.k8s.private_key_pem
+  filename = "${path.module}/k8s-key.pem"
+}
+
+# Security Group
+resource "aws_security_group" "k8s_sg" {
+  name        = "k8s-cluster-sg"
+  description = "Allow SSH and K8s ports"
+
+  ingress {
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    from_port   = 6443
+    to_port     = 6443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    from_port   = 30000
+    to_port     = 32767
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+# Master Node
 resource "aws_instance" "master" {
-  ami           = data.aws_ami.ubuntu.id
+  ami           = "ami-08e5424edfe926b43"
   instance_type = "t2.medium"
   key_name      = aws_key_pair.k8s_key.key_name
+  security_groups = [aws_security_group.k8s_sg.name]
 
   tags = {
     Name = "k8s-master"
   }
+
+  user_data = file("${path.module}/install_docker.sh")
 }
 
+# Worker Nodes
 resource "aws_instance" "workers" {
   count         = 2
-  ami           = data.aws_ami.ubuntu.id
+  ami           = "ami-08e5424edfe926b43"
   instance_type = "t2.medium"
   key_name      = aws_key_pair.k8s_key.key_name
+  security_groups = [aws_security_group.k8s_sg.name]
 
   tags = {
-    Name = "k8s-worker-${count.index}"
+    Name = "k8s-worker-${count.index + 1}"
   }
-}
 
-# --------------------------
-# Outputs
-# --------------------------
-output "private_key" {
-  value     = tls_private_key.ssh_key.private_key_pem
-  sensitive = true
+  user_data = file("${path.module}/install_docker.sh")
 }
 
 output "master_ip" {
   value = aws_instance.master.public_ip
 }
 
-output "worker1_ip" {
-  value = aws_instance.workers[0].public_ip
+output "worker_ips" {
+  value = [for w in aws_instance.workers : w.public_ip]
 }
 
-output "worker2_ip" {
-  value = aws_instance.workers[1].public_ip
+output "private_key" {
+  value     = tls_private_key.k8s.private_key_pem
+  sensitive = true
 }
