@@ -20,7 +20,7 @@ jobs:
   terraform_provision:
     name: "Provision Infra with Terraform"
     runs-on: ubuntu-latest
-    if: contains(join(github.event.head_commit.modified, ','), 'infra/')
+    if: contains(github.event.head_commit.message, '[skip-infra]') == false
     steps:
       - name: Checkout repo
         uses: actions/checkout@v3
@@ -38,19 +38,15 @@ jobs:
           aws-region: ${{ secrets.AWS_REGION }}
 
       - name: Terraform Apply
+        working-directory: infra
         run: |
-          cd infra
           terraform init
           terraform apply -auto-approve
 
   docker_build_push:
     name: "Build and Push Docker Images"
-    needs: [terraform_provision]
+    needs: terraform_provision
     runs-on: ubuntu-latest
-    if: contains(join(github.event.head_commit.modified, ','), 'frontend/') || 
-        contains(join(github.event.head_commit.modified, ','), 'catalogue/') || 
-        contains(join(github.event.head_commit.modified, ','), 'voting/') || 
-        contains(join(github.event.head_commit.modified, ','), 'recommendation/')
     steps:
       - name: Checkout CI repo
         uses: actions/checkout@v3
@@ -58,39 +54,25 @@ jobs:
       - name: Docker Login to Docker Hub
         run: echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
 
-      # Build Frontend
-      - name: Build and Push Frontend
-        if: contains(join(github.event.head_commit.modified, ','), 'frontend/')
+      - name: Build and Push All Services
         run: |
-          docker build -t $REGISTRY:frontend-latest ./frontend
-          docker push $REGISTRY:frontend-latest
-
-      # Build Catalogue
-      - name: Build and Push Catalogue
-        if: contains(join(github.event.head_commit.modified, ','), 'catalogue/')
-        run: |
-          docker build -t $REGISTRY:catalogue-latest ./catalogue
-          docker push $REGISTRY:catalogue-latest
-
-      # Build Voting
-      - name: Build and Push Voting
-        if: contains(join(github.event.head_commit.modified, ','), 'voting/')
-        run: |
-          docker build -t $REGISTRY:voting-latest ./voting
-          docker push $REGISTRY:voting-latest
-
-      # Build Recommendation
-      - name: Build and Push Recommendation
-        if: contains(join(github.event.head_commit.modified, ','), 'recommendation/')
-        run: |
-          docker build -t $REGISTRY:recommendation-latest ./recommendation
-          docker push $REGISTRY:recommendation-latest
+          if [ -d "frontend" ]; then
+            docker build -t $REGISTRY:frontend-latest ./frontend && docker push $REGISTRY:frontend-latest
+          fi
+          if [ -d "catalogue" ]; then
+            docker build -t $REGISTRY:catalogue-latest ./catalogue && docker push $REGISTRY:catalogue-latest
+          fi
+          if [ -d "voting" ]; then
+            docker build -t $REGISTRY:voting-latest ./voting && docker push $REGISTRY:voting-latest
+          fi
+          if [ -d "recommendation" ]; then
+            docker build -t $REGISTRY:recommendation-latest ./recommendation && docker push $REGISTRY:recommendation-latest
+          fi
 
   deploy_to_k8s:
     name: "Deploy to Kubernetes"
-    needs: [docker_build_push]
+    needs: docker_build_push
     runs-on: ubuntu-latest
-    if: contains(join(github.event.head_commit.modified, ','), 'k8s-manifests/')
     steps:
       - name: Checkout repo
         uses: actions/checkout@v3
@@ -102,5 +84,4 @@ jobs:
           chmod 600 ~/.kube/config
 
       - name: Deploy All Microservices
-        run: |
-          kubectl apply -f k8s-manifests/
+        run: kubectl apply -f k8s-manifests/
