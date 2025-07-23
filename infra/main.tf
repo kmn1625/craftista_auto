@@ -52,7 +52,7 @@ data "aws_vpc" "default" {
 }
 
 resource "aws_instance" "master" {
-  ami                         = "ami-0c55b159cbfafe1f0" # Ubuntu 22.04
+  ami                         = "ami-020cba7c55df1f615" # Ubuntu 22.04
   instance_type               = "t2.medium"
   key_name                    = aws_key_pair.k8s_key.key_name
   vpc_security_group_ids      = [aws_security_group.k8s_sg.id]
@@ -67,7 +67,7 @@ resource "aws_instance" "master" {
 
 resource "aws_instance" "workers" {
   count                       = 2
-  ami                         = "ami-0c55b159cbfafe1f0"
+  ami                         = "ami-020cba7c55df1f615"
   instance_type               = "t2.medium"
   key_name                    = aws_key_pair.k8s_key.key_name
   vpc_security_group_ids      = [aws_security_group.k8s_sg.id]
