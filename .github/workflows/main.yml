@@ -1,72 +1,131 @@
-name: Build, Deploy & Infra Provision
+name: Build, Provision Infra & Deploy
 
 on:
   push:
     branches: [main]
+    paths:
+      - 'infra/**'
+      - 'frontend/**'
+      - 'catalogue/**'
+      - 'voting/**'
+      - 'recommendation/**'
+      - 'k8s-manifests/**'
   workflow_dispatch:
 
-jobs:
-  changes:
-    runs-on: ubuntu-latest
-    outputs:
-      infra: ${{ steps.filter.outputs.infra }}
-      build: ${{ steps.filter.outputs.build }}
-      deploy: ${{ steps.filter.outputs.deploy }}
-    steps:
-      - uses: dorny/paths-filter@v3
-        id: filter
-        with:
-          filters: |
-            infra:
-              - 'infra/**'
-            build:
-              - 'frontend/**'
-              - 'catalogue/**'
-              - 'voting/**'
-              - 'recommendation/**'
-            deploy:
-              - 'k8s-manifests/**'
+env:
+  REGISTRY: kmn1624/craftista
+  AWS_REGION: ${{ secrets.AWS_REGION }}
 
+jobs:
   terraform_provision:
-    needs: changes
-    if: needs.changes.outputs.infra == 'true'
+    name: "Provision Infra and Setup K8s"
     runs-on: ubuntu-latest
+    if: contains(join(github.event.head_commit.modified, ','), 'infra/')
     steps:
-      - uses: actions/checkout@v3
-      - uses: hashicorp/setup-terraform@v2
+      - name: Checkout repo
+        uses: actions/checkout@v3
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
         with:
           terraform_version: 1.6.6
-      - uses: aws-actions/configure-aws-credentials@v2
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v2
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
-      - run: |
+
+      - name: Terraform Init & Apply
+        run: |
           cd infra
           terraform init
           terraform apply -auto-approve
+          terraform output -raw private_key > private.pem
+          chmod 600 private.pem
+          terraform output -raw master_ip > master_ip.txt
+          terraform output -raw worker_ips > worker_ips.txt
+
+      - name: Upload SSH Key as Artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: ssh-key
+          path: infra/private.pem
+
+      - name: Upload Kubeconfig
+        run: |
+          scp -o StrictHostKeyChecking=no -i infra/private.pem ubuntu@$(cat infra/master_ip.txt):/home/ubuntu/.kube/config kubeconfig
+        shell: bash
+
+      - name: Save Kubeconfig as Artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: kubeconfig
+          path: kubeconfig
 
   docker_build_push:
-    needs: [changes, terraform_provision]
-    if: needs.changes.outputs.build == 'true'
+    name: "Build and Push Docker Images"
+    needs: [terraform_provision]
     runs-on: ubuntu-latest
+    if: |
+      contains(join(github.event.head_commit.modified, ','), 'frontend/') ||
+      contains(join(github.event.head_commit.modified, ','), 'catalogue/') ||
+      contains(join(github.event.head_commit.modified, ','), 'voting/') ||
+      contains(join(github.event.head_commit.modified, ','), 'recommendation/')
     steps:
-      - uses: actions/checkout@v3
-      - run: echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
-      - run: |
-          if [ -d "frontend" ]; then docker build -t $REGISTRY:frontend-latest ./frontend && docker push $REGISTRY:frontend-latest; fi
-          if [ -d "catalogue" ]; then docker build -t $REGISTRY:catalogue-latest ./catalogue && docker push $REGISTRY:catalogue-latest; fi
-          if [ -d "voting" ]; then docker build -t $REGISTRY:voting-latest ./voting && docker push $REGISTRY:voting-latest; fi
-          if [ -d "recommendation" ]; then docker build -t $REGISTRY:recommendation-latest ./recommendation && docker push $REGISTRY:recommendation-latest; fi
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Docker Login
+        run: echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
+
+      - name: Build & Push Frontend
+        if: contains(join(github.event.head_commit.modified, ','), 'frontend/')
+        run: |
+          docker build -t $REGISTRY:frontend-latest ./frontend
+          docker push $REGISTRY:frontend-latest
+
+      - name: Build & Push Catalogue
+        if: contains(join(github.event.head_commit.modified, ','), 'catalogue/')
+        run: |
+          docker build -t $REGISTRY:catalogue-latest ./catalogue
+          docker push $REGISTRY:catalogue-latest
+
+      - name: Build & Push Voting
+        if: contains(join(github.event.head_commit.modified, ','), 'voting/')
+        run: |
+          docker build -t $REGISTRY:voting-latest ./voting
+          docker push $REGISTRY:voting-latest
+
+      - name: Build & Push Recommendation
+        if: contains(join(github.event.head_commit.modified, ','), 'recommendation/')
+        run: |
+          docker build -t $REGISTRY:recommendation-latest ./recommendation
+          docker push $REGISTRY:recommendation-latest
 
   deploy_to_k8s:
-    needs: [changes, docker_build_push]
-    if: needs.changes.outputs.deploy == 'true'
+    name: "Deploy to Kubernetes"
+    needs: [docker_build_push]
     runs-on: ubuntu-latest
+    if: contains(join(github.event.head_commit.modified, ','), 'k8s-manifests/')
     steps:
-      - uses: actions/checkout@v3
-      - name: Setup kubeconfig
+      - name: Checkout repo
+        uses: actions/checkout@v3
+
+      - name: Download kubeconfig
+        uses: actions/download-artifact@v3
+        with:
+          name: kubeconfig
+
+      - name: Setup kubectl
         run: |
           mkdir -p ~/.kube
-          ssh -i infra/k8s.pem -o StrictHostKeyChecking=no ubuntu@$(terraform output -raw master_public_ip) "cat /etc/kubernetes/admin.conf" > ~/.kube/config
-      - run: kubectl apply -f k8s-manifests/
+          mv kubeconfig ~/.kube/config
+          chmod 600 ~/.kube/config
+
+      - name: Deploy all services
+        run: |
+          kubectl apply -f k8s-manifests/
+          kubectl get pods -o wide
+          kubectl get svc -o wide
