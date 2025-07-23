@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
     paths:
-      - 'terraform/**'
+      - 'infra/**'
       - 'frontend/**'
       - 'catalogue/**'
       - 'voting/**'
@@ -20,61 +20,67 @@ jobs:
   terraform_provision:
     name: "Provision Infra with Terraform"
     runs-on: ubuntu-latest
-    if: contains(github.event.head_commit.message, '[skip terraform]') == false
+    if: contains(join(github.event.head_commit.modified, ','), 'infra/')
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout repo
+        uses: actions/checkout@v3
 
-      - uses: hashicorp/setup-terraform@v2
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
         with:
           terraform_version: 1.6.6
 
-      - uses: aws-actions/configure-aws-credentials@v2
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v2
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
       - name: Terraform Apply
-        if: github.event_name == 'workflow_dispatch' || startsWith(join(github.event.head_commit.modified, ','), 'terraform/')
         run: |
-          cd terraform
+          cd infra
           terraform init
           terraform apply -auto-approve
 
   docker_build_push:
-    name: "Build & Push Docker Images"
-    needs: terraform_provision
+    name: "Build and Push Docker Images"
+    needs: [terraform_provision]
     runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch' || 
-        contains(join(github.event.head_commit.modified, ','), 'frontend/') || 
+    if: contains(join(github.event.head_commit.modified, ','), 'frontend/') || 
         contains(join(github.event.head_commit.modified, ','), 'catalogue/') || 
         contains(join(github.event.head_commit.modified, ','), 'voting/') || 
         contains(join(github.event.head_commit.modified, ','), 'recommendation/')
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout CI repo
+        uses: actions/checkout@v3
 
-      - name: Docker Login
+      - name: Docker Login to Docker Hub
         run: echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
 
-      - name: Build & Push Frontend
+      # Build Frontend
+      - name: Build and Push Frontend
         if: contains(join(github.event.head_commit.modified, ','), 'frontend/')
         run: |
           docker build -t $REGISTRY:frontend-latest ./frontend
           docker push $REGISTRY:frontend-latest
 
-      - name: Build & Push Catalogue
+      # Build Catalogue
+      - name: Build and Push Catalogue
         if: contains(join(github.event.head_commit.modified, ','), 'catalogue/')
         run: |
           docker build -t $REGISTRY:catalogue-latest ./catalogue
           docker push $REGISTRY:catalogue-latest
 
-      - name: Build & Push Voting
+      # Build Voting
+      - name: Build and Push Voting
         if: contains(join(github.event.head_commit.modified, ','), 'voting/')
         run: |
           docker build -t $REGISTRY:voting-latest ./voting
           docker push $REGISTRY:voting-latest
 
-      - name: Build & Push Recommendation
+      # Build Recommendation
+      - name: Build and Push Recommendation
         if: contains(join(github.event.head_commit.modified, ','), 'recommendation/')
         run: |
           docker build -t $REGISTRY:recommendation-latest ./recommendation
@@ -82,11 +88,12 @@ jobs:
 
   deploy_to_k8s:
     name: "Deploy to Kubernetes"
-    needs: docker_build_push
+    needs: [docker_build_push]
     runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch' || contains(join(github.event.head_commit.modified, ','), 'k8s-manifests/')
+    if: contains(join(github.event.head_commit.modified, ','), 'k8s-manifests/')
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout repo
+        uses: actions/checkout@v3
 
       - name: Setup kubeconfig
         run: |
@@ -94,6 +101,6 @@ jobs:
           echo "${{ secrets.KUBECONFIG_DATA }}" | base64 -d > ~/.kube/config
           chmod 600 ~/.kube/config
 
-      - name: Deploy to K8s
+      - name: Deploy All Microservices
         run: |
           kubectl apply -f k8s-manifests/
