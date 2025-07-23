@@ -20,6 +20,10 @@ resource "aws_key_pair" "k8s_key" {
   public_key = tls_private_key.k8s_key.public_key_openssh
 }
 
+data "aws_vpc" "default" {
+  default = true
+}
+
 resource "aws_security_group" "k8s_sg" {
   name        = "k8s-cluster-sg-${random_pet.suffix.id}"
   description = "Security group for Kubernetes cluster"
@@ -45,10 +49,6 @@ resource "aws_security_group" "k8s_sg" {
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
   }
-}
-
-data "aws_vpc" "default" {
-  default = true
 }
 
 resource "aws_instance" "master" {
@@ -80,17 +80,15 @@ resource "aws_instance" "workers" {
   }
 }
 
-# Output Public IPs
+# ✅ Outputs
 output "instance_ips" {
-  value = [
-    aws_instance.master.public_ip,
-    aws_instance.workers[0].public_ip,
-    aws_instance.workers[1].public_ip
-  ]
+  description = "Public IPs of Master and Worker nodes"
+  value       = join("\n", [aws_instance.master.public_ip, aws_instance.workers[0].public_ip, aws_instance.workers[1].public_ip])
+  sensitive   = false
 }
 
-# Output SSH Key
 output "private_key" {
-  value     = tls_private_key.k8s_key.private_key_pem
-  sensitive = true
+  description = "Private SSH key for the cluster"
+  value       = tls_private_key.k8s_key.private_key_pem
+  sensitive   = true
 }
