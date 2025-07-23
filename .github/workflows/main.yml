@@ -35,13 +35,20 @@ jobs:
           terraform init
           terraform apply -auto-approve
 
+      - name: Save IPs and SSH Key
+        run: |
+          cd infra/
+          terraform output -raw instance_ips > instance_ips.txt
+          terraform output -raw private_key > k8s-key.pem
+          chmod 600 k8s-key.pem
+
       - name: Upload SSH Key & IPs as Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: k8s-artifacts
           path: |
-            infra/k8s-key.pem
             infra/instance_ips.txt
+            infra/k8s-key.pem
 
   docker_build_push:
     name: Build and Push Docker Images
@@ -80,7 +87,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: k8s-artifacts
-          path: ./infra
+          path: infra
 
       - name: Install SSH Client & Set Permissions
         run: |
@@ -97,7 +104,7 @@ jobs:
           scp -i infra/k8s-key.pem -o StrictHostKeyChecking=no infra/install_docker.sh ubuntu@$MASTER_IP:/home/ubuntu/
           scp -i infra/k8s-key.pem -o StrictHostKeyChecking=no infra/kube-install.sh ubuntu@$MASTER_IP:/home/ubuntu/
 
-          # Run setup
+          # Run setup on master
           ssh -i infra/k8s-key.pem -o StrictHostKeyChecking=no ubuntu@$MASTER_IP "bash install_docker.sh && bash kube-install.sh $WORKER1_IP $WORKER2_IP"
 
       - name: Deploy Microservices
@@ -110,7 +117,7 @@ jobs:
   destroy_infra:
     name: Rollback Infra if Failed
     runs-on: ubuntu-latest
-    if: failure() # Runs only when previous jobs fail
+    if: failure()
     needs: [terraform_provision, docker_build_push, deploy_to_k8s]
     steps:
       - name: Checkout repo
