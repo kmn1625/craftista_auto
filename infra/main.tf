@@ -2,18 +2,28 @@ provider "aws" {
   region = var.aws_region
 }
 
-resource "aws_vpc" "k8s_vpc" {
-  cidr_block = "10.0.0.0/16"
+variable "aws_region" {
+  default = "ap-south-1"
 }
 
-resource "aws_subnet" "k8s_subnet" {
-  vpc_id            = aws_vpc.k8s_vpc.id
-  cidr_block        = "10.0.1.0/24"
-  availability_zone = "ap-south-1a"
+resource "tls_private_key" "k8s_key" {
+  algorithm = "RSA"
+  rsa_bits  = 4096
+}
+
+resource "aws_key_pair" "k8s_key" {
+  key_name   = "k8s-key"
+  public_key = tls_private_key.k8s_key.public_key_openssh
+}
+
+output "private_key" {
+  value     = tls_private_key.k8s_key.private_key_pem
+  sensitive = true
 }
 
 resource "aws_security_group" "k8s_sg" {
-  vpc_id = aws_vpc.k8s_vpc.id
+  name        = "k8s-sg"
+  description = "Allow SSH, K8s, HTTP"
   ingress {
     from_port   = 22
     to_port     = 22
@@ -26,6 +36,18 @@ resource "aws_security_group" "k8s_sg" {
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
+  ingress {
+    from_port   = 30000
+    to_port     = 32767
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
   egress {
     from_port   = 0
     to_port     = 0
@@ -34,21 +56,56 @@ resource "aws_security_group" "k8s_sg" {
   }
 }
 
-resource "aws_instance" "k8s_master" {
-  ami           = var.ami_id
+resource "aws_instance" "master" {
+  ami           = "ami-0dee22c13ea7a9a67"
   instance_type = "t2.medium"
-  subnet_id     = aws_subnet.k8s_subnet.id
-  security_groups = [aws_security_group.k8s_sg.name]
   key_name      = aws_key_pair.k8s_key.key_name
-  user_data     = file("scripts/kube_master.sh")
+  security_groups = [aws_security_group.k8s_sg.name]
+  tags = { Name = "k8s-master" }
 }
 
-resource "aws_instance" "k8s_workers" {
+resource "aws_instance" "workers" {
   count         = 2
-  ami           = var.ami_id
-  instance_type = "t2.small"
-  subnet_id     = aws_subnet.k8s_subnet.id
-  security_groups = [aws_security_group.k8s_sg.name]
+  ami           = "ami-0dee22c13ea7a9a67"
+  instance_type = "t2.medium"
   key_name      = aws_key_pair.k8s_key.key_name
-  user_data     = file("scripts/kube_worker.sh")
+  security_groups = [aws_security_group.k8s_sg.name]
+  tags = { Name = "k8s-worker-${count.index}" }
+}
+
+output "master_ip" {
+  value = aws_instance.master.public_ip
+}
+
+output "worker_ips" {
+  value = aws_instance.workers[*].public_ip
+}
+
+# Provision Kubernetes
+resource "null_resource" "install_k8s" {
+  depends_on = [aws_instance.master, aws_instance.workers]
+
+  provisioner "file" {
+    source      = "${path.module}/kube-install.sh"
+    destination = "/home/ubuntu/kube-install.sh"
+    connection {
+      type        = "ssh"
+      user        = "ubuntu"
+      private_key = tls_private_key.k8s_key.private_key_pem
+      host        = aws_instance.master.public_ip
+    }
+  }
+
+  provisioner "remote-exec" {
+    inline = [
+      "chmod +x /home/ubuntu/kube-install.sh",
+      "sudo /home/ubuntu/kube-install.sh ${join(" ", aws_instance.workers[*].private_ip)}"
+    ]
+    connection {
+      type        = "ssh"
+      user        = "ubuntu"
+      private_key = tls_private_key.k8s_key.private_key_pem
+      host        = aws_instance.master.public_ip
+    }
+  }
 }
