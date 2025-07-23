@@ -2,33 +2,43 @@ provider "aws" {
   region = "us-east-1"
 }
 
+# -------------------
 # Generate SSH key pair
+# -------------------
 resource "tls_private_key" "k8s_key" {
   algorithm = "RSA"
   rsa_bits  = 4096
 }
 
-# Save private key locally
+# Save private key locally (for debugging; pipeline uses Terraform output)
 resource "local_file" "private_key" {
   content  = tls_private_key.k8s_key.private_key_pem
   filename = "${path.module}/k8s-key.pem"
 }
 
-# Add randomness to resource names
+# -------------------
+# Add randomness to avoid duplicates
+# -------------------
 resource "random_pet" "suffix" {}
 
+# -------------------
 # Create AWS key pair
+# -------------------
 resource "aws_key_pair" "k8s_key" {
   key_name   = "k8s-key-${random_pet.suffix.id}"
   public_key = tls_private_key.k8s_key.public_key_openssh
 }
 
+# -------------------
 # Use default VPC
+# -------------------
 data "aws_vpc" "default" {
   default = true
 }
 
+# -------------------
 # Create Security Group
+# -------------------
 resource "aws_security_group" "k8s_sg" {
   name        = "k8s-cluster-sg-${random_pet.suffix.id}"
   description = "Security group for Kubernetes cluster"
@@ -56,7 +66,9 @@ resource "aws_security_group" "k8s_sg" {
   }
 }
 
+# -------------------
 # Create Kubernetes master node
+# -------------------
 resource "aws_instance" "master" {
   ami                         = "ami-020cba7c55df1f615" # Ubuntu 22.04
   instance_type               = "t2.medium"
@@ -71,7 +83,9 @@ resource "aws_instance" "master" {
   }
 }
 
+# -------------------
 # Create two worker nodes
+# -------------------
 resource "aws_instance" "workers" {
   count                       = 2
   ami                         = "ami-020cba7c55df1f615"
@@ -91,16 +105,13 @@ resource "aws_instance" "workers" {
 # Outputs for Pipeline
 # -------------------
 
-# Public IPs in JSON-friendly list format
+# ✅ Public IPs in JSON list format for jq
 output "instance_ips" {
-  value = [
-    aws_instance.master.public_ip,
-    aws_instance.workers[0].public_ip,
-    aws_instance.workers[1].public_ip
-  ]
+  value       = [aws_instance.master.public_ip, aws_instance.workers[*].public_ip]
+  description = "List of public IPs: master and workers"
 }
 
-# SSH private key for pipeline
+# ✅ Private key (sensitive)
 output "private_key" {
   value     = tls_private_key.k8s_key.private_key_pem
   sensitive = true
