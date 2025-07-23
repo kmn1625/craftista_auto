@@ -35,20 +35,31 @@ jobs:
           terraform init
           terraform apply -auto-approve
 
-      - name: Extract Outputs & Save Files
+      - name: Extract IPs and SSH Key
         run: |
           cd infra/
           sudo apt-get install -y jq
-          if terraform output -json instance_ips > tmp.json; then
-            jq -r '.[]' tmp.json > instance_ips.txt
-          else
-            echo "Failed to extract instance IPs" && exit 1
+
+          # Validate state
+          if [ ! -f terraform.tfstate ]; then
+            echo "Terraform state not found! Exiting." && exit 1
           fi
-          if terraform output -raw private_key > k8s-key.pem; then
-            chmod 600 k8s-key.pem
-          else
-            echo "Failed to extract private key" && exit 1
+
+          # Extract instance IPs
+          INSTANCE_IPS_JSON=$(terraform output -json instance_ips || echo "")
+          if [ -z "$INSTANCE_IPS_JSON" ]; then
+            echo "No instance IPs found!" && exit 1
           fi
+          echo "$INSTANCE_IPS_JSON" | jq -r '.[]' > instance_ips.txt
+
+          # Extract private key
+          PRIVATE_KEY=$(terraform output -raw private_key || echo "")
+          if [ -z "$PRIVATE_KEY" ]; then
+            echo "No private key found!" && exit 1
+          fi
+          echo "$PRIVATE_KEY" > k8s-key.pem
+          chmod 600 k8s-key.pem
+
           echo "Extracted IPs:"
           cat instance_ips.txt
 
@@ -88,7 +99,7 @@ jobs:
   deploy_to_k8s:
     name: Deploy to Kubernetes
     runs-on: ubuntu-latest
-    needs: docker_build_push
+    needs: [docker_build_push]
     steps:
       - name: Checkout Repo
         uses: actions/checkout@v4
@@ -112,9 +123,11 @@ jobs:
 
           echo "Master: $MASTER_IP, Worker1: $WORKER1_IP, Worker2: $WORKER2_IP"
 
+          # Copy scripts
           scp -i infra/k8s-key.pem -o StrictHostKeyChecking=no infra/install_docker.sh ubuntu@$MASTER_IP:/home/ubuntu/
           scp -i infra/k8s-key.pem -o StrictHostKeyChecking=no infra/kube-install.sh ubuntu@$MASTER_IP:/home/ubuntu/
 
+          # Run setup on master
           ssh -i infra/k8s-key.pem -o StrictHostKeyChecking=no ubuntu@$MASTER_IP "bash install_docker.sh && bash kube-install.sh $WORKER1_IP $WORKER2_IP"
 
       - name: Deploy Microservices
