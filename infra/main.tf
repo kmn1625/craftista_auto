@@ -60,7 +60,7 @@ resource "aws_security_group" "k8s_sg" {
 
 # Master Node
 resource "aws_instance" "master" {
-  ami           = "ami-08e5424edfe926b43"
+  ami           = "ami-020cba7c55df1f615"
   instance_type = "t2.medium"
   key_name      = aws_key_pair.k8s_key.key_name
   security_groups = [aws_security_group.k8s_sg.name]
@@ -75,7 +75,7 @@ resource "aws_instance" "master" {
 # Worker Nodes
 resource "aws_instance" "workers" {
   count         = 2
-  ami           = "ami-08e5424edfe926b43"
+  ami           = "ami-020cba7c55df1f615"
   instance_type = "t2.medium"
   key_name      = aws_key_pair.k8s_key.key_name
   security_groups = [aws_security_group.k8s_sg.name]
