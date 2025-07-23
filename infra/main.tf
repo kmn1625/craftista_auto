@@ -2,55 +2,53 @@ provider "aws" {
   region = var.aws_region
 }
 
+resource "aws_vpc" "k8s_vpc" {
+  cidr_block = "10.0.0.0/16"
+}
 
-resource "aws_instance" "masters" {
-  count         = 1
-  ami           = var.ami_id
-  instance_type = "t2.medium"
-  key_name      = aws_key_pair.k8s_key.key_name
-  subnet_id     = var.subnet_id
-  tags = {
-    Name = "k8s-master-${count.index}"
+resource "aws_subnet" "k8s_subnet" {
+  vpc_id            = aws_vpc.k8s_vpc.id
+  cidr_block        = "10.0.1.0/24"
+  availability_zone = "ap-south-1a"
+}
+
+resource "aws_security_group" "k8s_sg" {
+  vpc_id = aws_vpc.k8s_vpc.id
+  ingress {
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  ingress {
+    from_port   = 6443
+    to_port     = 6443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
   }
 }
 
-resource "aws_instance" "workers" {
+resource "aws_instance" "k8s_master" {
+  ami           = var.ami_id
+  instance_type = "t2.medium"
+  subnet_id     = aws_subnet.k8s_subnet.id
+  security_groups = [aws_security_group.k8s_sg.name]
+  key_name      = aws_key_pair.k8s_key.key_name
+  user_data     = file("scripts/kube_master.sh")
+}
+
+resource "aws_instance" "k8s_workers" {
   count         = 2
   ami           = var.ami_id
-  instance_type = "t2.medium"
+  instance_type = "t2.small"
+  subnet_id     = aws_subnet.k8s_subnet.id
+  security_groups = [aws_security_group.k8s_sg.name]
   key_name      = aws_key_pair.k8s_key.key_name
-  subnet_id     = var.subnet_id
-  tags = {
-    Name = "k8s-worker-${count.index}"
-  }
-}
-
-resource "null_resource" "k8s_setup" {
-  depends_on = [aws_instance.masters, aws_instance.workers]
-
-  provisioner "remote-exec" {
-    inline = [
-      "sudo apt-get update -y",
-      "sudo apt-get install -y apt-transport-https curl kubeadm kubelet kubectl containerd",
-      "sudo kubeadm init --apiserver-advertise-address=${aws_instance.masters[0].private_ip} --pod-network-cidr=10.244.0.0/16",
-      "mkdir -p $HOME/.kube",
-      "sudo cp /etc/kubernetes/admin.conf $HOME/.kube/config",
-      "sudo chown $(id -u):$(id -g) $HOME/.kube/config"
-    ]
-
-    connection {
-      type        = "ssh"
-      user        = "ubuntu"
-      private_key = file("~/.ssh/id_rsa")
-      host        = aws_instance.masters[0].public_ip
-    }
-  }
-
-  provisioner "local-exec" {
-    command = "scp -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa ubuntu@${aws_instance.masters[0].public_ip}:/home/ubuntu/.kube/config ./kubeconfig"
-  }
-}
-
-output "kubeconfig_path" {
-  value = "${path.module}/kubeconfig"
+  user_data     = file("scripts/kube_worker.sh")
 }
