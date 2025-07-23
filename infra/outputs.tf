@@ -1,11 +1,12 @@
-# outputs.tf
-
-output "master_ips" {
-  description = "Public IPs of Kubernetes master nodes"
-  value       = aws_instance.master[*].public_ip
+output "master_public_ip" {
+  value = aws_instance.k8s_master.public_ip
 }
 
 output "worker_ips" {
-  description = "Public IPs of Kubernetes worker nodes"
-  value       = aws_instance.worker[*].public_ip
+  value = [for w in aws_instance.k8s_workers : w.public_ip]
+}
+
+output "private_key" {
+  sensitive = true
+  value     = tls_private_key.k8s_keygen.private_key_pem
 }
