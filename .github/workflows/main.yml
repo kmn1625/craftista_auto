@@ -3,6 +3,13 @@ name: Build, Deploy & Infra Provision
 on:
   push:
     branches: [main]
+    paths:
+      - 'terraform/**'
+      - 'frontend/**'
+      - 'catalogue/**'
+      - 'voting/**'
+      - 'recommendation/**'
+      - 'k8s-manifests/**'
   workflow_dispatch:
 
 env:
@@ -13,6 +20,7 @@ jobs:
   terraform_provision:
     name: "Provision Infra with Terraform"
     runs-on: ubuntu-latest
+    if: contains(join(github.event.head_commit.modified, ','), 'terraform/')
     steps:
       - name: Checkout repo
         uses: actions/checkout@v3
@@ -29,60 +37,60 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: Cleanup old infra (optional destroy)
-        run: |
-          cd infra/
-          terraform init
-          terraform destroy -auto-approve || true
-        continue-on-error: true  # Prevent pipeline failure on destroy
-
       - name: Terraform Apply
         run: |
-          cd infra/
+          cd terraform/
+          terraform init
           terraform apply -auto-approve
 
   docker_build_push:
     name: "Build and Push Docker Images"
-    needs: terraform_provision
+    needs: [terraform_provision]
     runs-on: ubuntu-latest
-    services:
-      docker:
-        image: docker:20.10.24-dind
-        options: --privileged
+    if: contains(join(github.event.head_commit.modified, ','), 'frontend/') || 
+        contains(join(github.event.head_commit.modified, ','), 'catalogue/') || 
+        contains(join(github.event.head_commit.modified, ','), 'voting/') || 
+        contains(join(github.event.head_commit.modified, ','), 'recommendation/')
     steps:
       - name: Checkout CI repo
         uses: actions/checkout@v3
 
-      - name: Clone Microservices Repo
-        run: git clone https://github.com/kmn1625/craftista_auto.git source-code
-
       - name: Docker Login to Docker Hub
         run: echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
 
+      # Build Frontend
       - name: Build and Push Frontend
+        if: contains(join(github.event.head_commit.modified, ','), 'frontend/')
         run: |
           docker build -t $REGISTRY:frontend-latest ./frontend
           docker push $REGISTRY:frontend-latest
 
+      # Build Catalogue
       - name: Build and Push Catalogue
+        if: contains(join(github.event.head_commit.modified, ','), 'catalogue/')
         run: |
           docker build -t $REGISTRY:catalogue-latest ./catalogue
           docker push $REGISTRY:catalogue-latest
 
+      # Build Voting
       - name: Build and Push Voting
+        if: contains(join(github.event.head_commit.modified, ','), 'voting/')
         run: |
           docker build -t $REGISTRY:voting-latest ./voting
           docker push $REGISTRY:voting-latest
 
+      # Build Recommendation
       - name: Build and Push Recommendation
+        if: contains(join(github.event.head_commit.modified, ','), 'recommendation/')
         run: |
           docker build -t $REGISTRY:recommendation-latest ./recommendation
           docker push $REGISTRY:recommendation-latest
 
   deploy_to_k8s:
     name: "Deploy to Kubernetes"
-    needs: docker_build_push
+    needs: [docker_build_push]
     runs-on: ubuntu-latest
+    if: contains(join(github.event.head_commit.modified, ','), 'k8s-manifests/')
     steps:
       - name: Checkout repo
         uses: actions/checkout@v3
@@ -91,10 +99,8 @@ jobs:
         run: |
           mkdir -p ~/.kube
           echo "${{ secrets.KUBECONFIG_DATA }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
 
       - name: Deploy All Microservices
         run: |
-          kubectl apply -f k8s-manifests/frontend.yaml
-          kubectl apply -f k8s-manifests/catalogue.yaml
-          kubectl apply -f k8s-manifests/voting.yaml
-          kubectl apply -f k8s-manifests/recommendation.yaml
+          kubectl apply -f k8s-manifests/
