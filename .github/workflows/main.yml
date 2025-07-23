@@ -38,10 +38,11 @@ jobs:
       - name: Extract Outputs & Save Files
         run: |
           cd infra/
+          sudo apt-get install -y jq
           terraform output -json instance_ips | jq -r '.[]' > instance_ips.txt
           terraform output -raw private_key > k8s-key.pem
           chmod 600 k8s-key.pem
-          ls -la
+          cat instance_ips.txt
 
       - name: Upload SSH Key & IPs as Artifacts
         uses: actions/upload-artifact@v4
@@ -103,11 +104,9 @@ jobs:
 
           echo "Master: $MASTER_IP, Worker1: $WORKER1_IP, Worker2: $WORKER2_IP"
 
-          # Copy scripts
           scp -i infra/k8s-key.pem -o StrictHostKeyChecking=no infra/install_docker.sh ubuntu@$MASTER_IP:/home/ubuntu/
           scp -i infra/k8s-key.pem -o StrictHostKeyChecking=no infra/kube-install.sh ubuntu@$MASTER_IP:/home/ubuntu/
 
-          # Run setup
           ssh -i infra/k8s-key.pem -o StrictHostKeyChecking=no ubuntu@$MASTER_IP "bash install_docker.sh && bash kube-install.sh $WORKER1_IP $WORKER2_IP"
 
       - name: Deploy Microservices
