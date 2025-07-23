@@ -38,7 +38,7 @@ jobs:
       - name: Extract Outputs & Save Files
         run: |
           cd infra/
-          terraform output -raw instance_ips > instance_ips.txt
+          terraform output -json instance_ips | jq -r '.[]' > instance_ips.txt
           terraform output -raw private_key > k8s-key.pem
           chmod 600 k8s-key.pem
           ls -la
