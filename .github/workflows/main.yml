@@ -35,20 +35,21 @@ jobs:
           terraform init
           terraform apply -auto-approve
 
-      - name: Save IPs and SSH Key
+      - name: Extract Outputs & Save Files
         run: |
           cd infra/
           terraform output -raw instance_ips > instance_ips.txt
           terraform output -raw private_key > k8s-key.pem
           chmod 600 k8s-key.pem
+          ls -la
 
       - name: Upload SSH Key & IPs as Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: k8s-artifacts
           path: |
-            infra/instance_ips.txt
             infra/k8s-key.pem
+            infra/instance_ips.txt
 
   docker_build_push:
     name: Build and Push Docker Images
@@ -78,7 +79,7 @@ jobs:
   deploy_to_k8s:
     name: Deploy to Kubernetes
     runs-on: ubuntu-latest
-    needs: [docker_build_push]
+    needs: docker_build_push
     steps:
       - name: Checkout Repo
         uses: actions/checkout@v4
@@ -87,7 +88,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: k8s-artifacts
-          path: infra
+          path: ./infra
 
       - name: Install SSH Client & Set Permissions
         run: |
@@ -100,11 +101,13 @@ jobs:
           WORKER1_IP=$(sed -n '2p' infra/instance_ips.txt)
           WORKER2_IP=$(sed -n '3p' infra/instance_ips.txt)
 
+          echo "Master: $MASTER_IP, Worker1: $WORKER1_IP, Worker2: $WORKER2_IP"
+
           # Copy scripts
           scp -i infra/k8s-key.pem -o StrictHostKeyChecking=no infra/install_docker.sh ubuntu@$MASTER_IP:/home/ubuntu/
           scp -i infra/k8s-key.pem -o StrictHostKeyChecking=no infra/kube-install.sh ubuntu@$MASTER_IP:/home/ubuntu/
 
-          # Run setup on master
+          # Run setup
           ssh -i infra/k8s-key.pem -o StrictHostKeyChecking=no ubuntu@$MASTER_IP "bash install_docker.sh && bash kube-install.sh $WORKER1_IP $WORKER2_IP"
 
       - name: Deploy Microservices
