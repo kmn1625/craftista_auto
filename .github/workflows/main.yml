@@ -1,14 +1,20 @@
-name: Full Infra, Build & Deploy Pipeline
+name: Full Automated Infra, Build & Deploy
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
+    paths:
+      - 'terraform/**'
+      - 'frontend/**'
+      - 'catalogue/**'
+      - 'voting/**'
+      - 'recommendation/**'
+      - 'k8s-manifests/**'
   workflow_dispatch:
 
 env:
   REGISTRY: kmn1624/craftista
-  AWS_REGION: ap-south-1
+  AWS_REGION: ${{ secrets.AWS_REGION }}
 
 jobs:
   terraform_provision:
@@ -16,9 +22,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repo
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
-      - name: Install Terraform
+      - name: Setup Terraform
         uses: hashicorp/setup-terraform@v2
         with:
           terraform_version: 1.6.6
@@ -28,100 +34,113 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ap-south-1
+          aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: Terraform Init & Apply
+      - name: Run Terraform
         run: |
-          cd infra
+          cd terraform/
           terraform init
           terraform apply -auto-approve
 
-      - name: Save SSH Key as Artifact
-        run: |
-          cd infra
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > private_key.pem
-          chmod 600 private_key.pem
-          echo "Private key saved"
-        shell: bash
+      - name: Upload SSH Private Key
+        uses: actions/upload-artifact@v4
+        with:
+          name: ssh-key
+          path: terraform/k8s-key.pem
+
+      - name: Upload Instance IPs
+        run: cat terraform/instance_ips.txt
+        uses: actions/upload-artifact@v4
+        with:
+          name: instance-ips
+          path: terraform/instance_ips.txt
 
   install_k8s:
-    name: "Install Kubernetes (kubeadm)"
-    runs-on: ubuntu-latest
+    name: "Install Kubernetes & Generate Kubeconfig"
     needs: terraform_provision
+    runs-on: ubuntu-latest
     steps:
-      - name: Checkout Repo
-        uses: actions/checkout@v3
-
-      - name: Download SSH Key Artifact
-        uses: actions/download-artifact@v3
+      - name: Download SSH Key
+        uses: actions/download-artifact@v4
         with:
-          name: private-key
-          path: ./ssh
+          name: ssh-key
+          path: .
 
-      - name: SSH into Master & Configure Cluster
+      - name: Download Instance IPs
+        uses: actions/download-artifact@v4
+        with:
+          name: instance-ips
+          path: .
+
+      - name: Install K8s on Cluster
         run: |
-          chmod 600 ./ssh/private_key.pem
-          MASTER_IP=$(terraform -chdir=infra output -raw master_ip)
-          WORKER1_IP=$(terraform -chdir=infra output -raw worker1_ip)
-          WORKER2_IP=$(terraform -chdir=infra output -raw worker2_ip)
+          chmod 400 k8s-key.pem
+          MASTER_IP=$(head -1 instance_ips.txt)
+          WORKER_IPS=$(tail -n +2 instance_ips.txt)
 
-          echo "Installing Kubernetes on all nodes..."
-          scp -o StrictHostKeyChecking=no -i ./ssh/private_key.pem scripts/kube-install.sh ubuntu@$MASTER_IP:/home/ubuntu/
-          ssh -o StrictHostKeyChecking=no -i ./ssh/private_key.pem ubuntu@$MASTER_IP "chmod +x kube-install.sh && sudo ./kube-install.sh master $MASTER_IP $WORKER1_IP $WORKER2_IP"
-          
-          echo "Fetching kubeconfig..."
-          scp -o StrictHostKeyChecking=no -i ./ssh/private_key.pem ubuntu@$MASTER_IP:/home/ubuntu/.kube/config kubeconfig
-          
-      - name: Upload kubeconfig as Artifact
-        uses: actions/upload-artifact@v3
+          # Install kubeadm and Docker on master
+          ssh -o StrictHostKeyChecking=no -i k8s-key.pem ubuntu@$MASTER_IP "bash -s" < terraform/kube-install.sh master "$WORKER_IPS"
+
+          # Generate kubeconfig and copy locally
+          scp -o StrictHostKeyChecking=no -i k8s-key.pem ubuntu@$MASTER_IP:/home/ubuntu/admin.conf kubeconfig
+
+      - name: Upload Kubeconfig
+        uses: actions/upload-artifact@v4
         with:
           name: kubeconfig
           path: kubeconfig
 
   docker_build_push:
-    name: "Build & Push Docker Images"
-    runs-on: ubuntu-latest
+    name: "Build and Push Docker Images"
     needs: install_k8s
+    runs-on: ubuntu-latest
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v3
+      - name: Checkout Repo
+        uses: actions/checkout@v4
 
       - name: Docker Login
         run: echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
 
-      - name: Build & Push Images
+      - name: Build & Push Frontend
         run: |
           docker build -t $REGISTRY:frontend-latest ./frontend
           docker push $REGISTRY:frontend-latest
 
+      - name: Build & Push Catalogue
+        run: |
           docker build -t $REGISTRY:catalogue-latest ./catalogue
           docker push $REGISTRY:catalogue-latest
 
+      - name: Build & Push Voting
+        run: |
           docker build -t $REGISTRY:voting-latest ./voting
           docker push $REGISTRY:voting-latest
 
+      - name: Build & Push Recommendation
+        run: |
           docker build -t $REGISTRY:recommendation-latest ./recommendation
           docker push $REGISTRY:recommendation-latest
 
   deploy_to_k8s:
-    name: "Deploy App to Kubernetes"
-    runs-on: ubuntu-latest
+    name: "Deploy to Kubernetes"
     needs: docker_build_push
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout Repo
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
-      - name: Download kubeconfig
-        uses: actions/download-artifact@v3
+      - name: Download Kubeconfig
+        uses: actions/download-artifact@v4
         with:
           name: kubeconfig
           path: ~/.kube
 
-      - name: Setup kubectl
-        run: |
-          mv ~/.kube/kubeconfig ~/.kube/config
-          chmod 600 ~/.kube/config
+      - name: Set KUBECONFIG
+        run: echo "KUBECONFIG=$HOME/.kube/kubeconfig" >> $GITHUB_ENV
 
-      - name: Deploy Microservices
+      - name: Deploy All Microservices
         run: |
-          kubectl apply -f k8s-manifests/
+          kubectl apply -f k8s-manifests/frontend.yaml
+          kubectl apply -f k8s-manifests/catalogue.yaml
+          kubectl apply -f k8s-manifests/voting.yaml
+          kubectl apply -f k8s-manifests/recommendation.yaml
