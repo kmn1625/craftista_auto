@@ -2,32 +2,29 @@ provider "aws" {
   region = "us-east-1"
 }
 
-# Generate SSH Key Pair Locally
-resource "tls_private_key" "k8s" {
+resource "tls_private_key" "k8s_key" {
   algorithm = "RSA"
   rsa_bits  = 4096
 }
 
-# Create Key Pair in AWS
 resource "aws_key_pair" "k8s_key" {
-  key_name   = "k8s-key"
-  public_key = tls_private_key.k8s.public_key_openssh
-
-  lifecycle {
-    prevent_destroy = false
-  }
+  key_name   = "k8s-key-${random_id.suffix.hex}"   # ✅ Unique key
+  public_key = tls_private_key.k8s_key.public_key_openssh
 }
 
-# Save Private Key Locally for GitHub Artifact
 resource "local_file" "private_key" {
-  content  = tls_private_key.k8s.private_key_pem
   filename = "${path.module}/k8s-key.pem"
+  content  = tls_private_key.k8s_key.private_key_pem
 }
 
-# Security Group
+resource "random_id" "suffix" {
+  byte_length = 4
+}
+
 resource "aws_security_group" "k8s_sg" {
-  name        = "k8s-cluster-sg"
-  description = "Allow SSH and K8s ports"
+  name        = "k8s-cluster-sg-${random_id.suffix.hex}"  # ✅ Unique name
+  description = "Kubernetes Cluster SG"
+  vpc_id      = data.aws_vpc.default.id
 
   ingress {
     from_port   = 22
@@ -58,7 +55,10 @@ resource "aws_security_group" "k8s_sg" {
   }
 }
 
-# Master Node
+data "aws_vpc" "default" {
+  default = true
+}
+
 resource "aws_instance" "master" {
   ami           = "ami-020cba7c55df1f615"
   instance_type = "t2.medium"
@@ -66,13 +66,12 @@ resource "aws_instance" "master" {
   security_groups = [aws_security_group.k8s_sg.name]
 
   tags = {
-    Name = "k8s-master"
+    Name = "k8s-master-${random_id.suffix.hex}"
   }
 
   user_data = file("${path.module}/install_docker.sh")
 }
 
-# Worker Nodes
 resource "aws_instance" "workers" {
   count         = 2
   ami           = "ami-020cba7c55df1f615"
@@ -81,21 +80,21 @@ resource "aws_instance" "workers" {
   security_groups = [aws_security_group.k8s_sg.name]
 
   tags = {
-    Name = "k8s-worker-${count.index + 1}"
+    Name = "k8s-worker-${count.index + 1}-${random_id.suffix.hex}"
   }
 
   user_data = file("${path.module}/install_docker.sh")
 }
 
-output "master_ip" {
+output "master_public_ip" {
   value = aws_instance.master.public_ip
 }
 
 output "worker_ips" {
-  value = [for w in aws_instance.workers : w.public_ip]
+  value = [for instance in aws_instance.workers : instance.public_ip]
 }
 
 output "private_key" {
-  value     = tls_private_key.k8s.private_key_pem
+  value     = local_file.private_key.filename
   sensitive = true
 }
