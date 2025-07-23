@@ -1,4 +1,4 @@
-name: Full Automated Infra, Build & Deploy
+name: Build, Deploy & Infra Provision
 
 on:
   push:
@@ -21,7 +21,7 @@ jobs:
     name: "Provision Infra with Terraform"
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Repo
+      - name: Checkout repo
         uses: actions/checkout@v4
 
       - name: Setup Terraform
@@ -36,7 +36,7 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: Run Terraform
+      - name: Terraform Apply
         run: |
           cd terraform/
           terraform init
@@ -48,75 +48,42 @@ jobs:
           name: ssh-key
           path: terraform/k8s-key.pem
 
-      - name: Upload Instance IPs
+      - name: Show Instance IPs
         run: cat terraform/instance_ips.txt
+
+      - name: Upload Instance IPs
         uses: actions/upload-artifact@v4
         with:
           name: instance-ips
           path: terraform/instance_ips.txt
 
-  install_k8s:
-    name: "Install Kubernetes & Generate Kubeconfig"
+  docker_build_push:
+    name: "Build and Push Docker Images"
     needs: terraform_provision
     runs-on: ubuntu-latest
     steps:
-      - name: Download SSH Key
-        uses: actions/download-artifact@v4
-        with:
-          name: ssh-key
-          path: .
-
-      - name: Download Instance IPs
-        uses: actions/download-artifact@v4
-        with:
-          name: instance-ips
-          path: .
-
-      - name: Install K8s on Cluster
-        run: |
-          chmod 400 k8s-key.pem
-          MASTER_IP=$(head -1 instance_ips.txt)
-          WORKER_IPS=$(tail -n +2 instance_ips.txt)
-
-          # Install kubeadm and Docker on master
-          ssh -o StrictHostKeyChecking=no -i k8s-key.pem ubuntu@$MASTER_IP "bash -s" < terraform/kube-install.sh master "$WORKER_IPS"
-
-          # Generate kubeconfig and copy locally
-          scp -o StrictHostKeyChecking=no -i k8s-key.pem ubuntu@$MASTER_IP:/home/ubuntu/admin.conf kubeconfig
-
-      - name: Upload Kubeconfig
-        uses: actions/upload-artifact@v4
-        with:
-          name: kubeconfig
-          path: kubeconfig
-
-  docker_build_push:
-    name: "Build and Push Docker Images"
-    needs: install_k8s
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout Repo
+      - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Docker Login
+      - name: Docker Login to Docker Hub
         run: echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
 
-      - name: Build & Push Frontend
+      - name: Build and Push Frontend
         run: |
           docker build -t $REGISTRY:frontend-latest ./frontend
           docker push $REGISTRY:frontend-latest
 
-      - name: Build & Push Catalogue
+      - name: Build and Push Catalogue
         run: |
           docker build -t $REGISTRY:catalogue-latest ./catalogue
           docker push $REGISTRY:catalogue-latest
 
-      - name: Build & Push Voting
+      - name: Build and Push Voting
         run: |
           docker build -t $REGISTRY:voting-latest ./voting
           docker push $REGISTRY:voting-latest
 
-      - name: Build & Push Recommendation
+      - name: Build and Push Recommendation
         run: |
           docker build -t $REGISTRY:recommendation-latest ./recommendation
           docker push $REGISTRY:recommendation-latest
@@ -126,21 +93,29 @@ jobs:
     needs: docker_build_push
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Repo
+      - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Download Kubeconfig
+      - name: Download SSH Key
         uses: actions/download-artifact@v4
         with:
-          name: kubeconfig
-          path: ~/.kube
+          name: ssh-key
+          path: ~/.ssh/
 
-      - name: Set KUBECONFIG
-        run: echo "KUBECONFIG=$HOME/.kube/kubeconfig" >> $GITHUB_ENV
+      - name: Set Permissions
+        run: chmod 600 ~/.ssh/k8s-key.pem
 
-      - name: Deploy All Microservices
+      - name: Download Instance IPs
+        uses: actions/download-artifact@v4
+        with:
+          name: instance-ips
+          path: .
+
+      - name: Setup SSH Config
         run: |
-          kubectl apply -f k8s-manifests/frontend.yaml
-          kubectl apply -f k8s-manifests/catalogue.yaml
-          kubectl apply -f k8s-manifests/voting.yaml
-          kubectl apply -f k8s-manifests/recommendation.yaml
+          echo "StrictHostKeyChecking no" >> ~/.ssh/config
+
+      - name: Install Kubernetes on Cluster
+        run: |
+          MASTER_IP=$(head -n 1 instance_ips.txt)
+          ssh -i ~/.ssh/k8s-key.pem ubuntu@$MASTER_IP 'bash -_
