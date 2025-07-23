@@ -37,20 +37,32 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: Terraform Apply
+      - name: Apply Terraform & Generate kubeconfig
         run: |
           cd terraform/
           terraform init
           terraform apply -auto-approve
 
+      - name: Upload kubeconfig as GitHub Secret
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          if [ ! -f terraform/kubeconfig ]; then
+            echo "ERROR: kubeconfig not found"
+            exit 1
+          fi
+          KUBECONFIG_B64=$(base64 -w 0 terraform/kubeconfig)
+          echo "$KUBECONFIG_B64" | gh secret set KUBECONFIG_DATA --repo $GITHUB_REPOSITORY
+
   docker_build_push:
     name: "Build and Push Docker Images"
     needs: [terraform_provision]
     runs-on: ubuntu-latest
-    if: contains(join(github.event.head_commit.modified, ','), 'frontend/') || 
-        contains(join(github.event.head_commit.modified, ','), 'catalogue/') || 
-        contains(join(github.event.head_commit.modified, ','), 'voting/') || 
-        contains(join(github.event.head_commit.modified, ','), 'recommendation/')
+    if: |
+      contains(join(github.event.head_commit.modified, ','), 'frontend/') || 
+      contains(join(github.event.head_commit.modified, ','), 'catalogue/') || 
+      contains(join(github.event.head_commit.modified, ','), 'voting/') || 
+      contains(join(github.event.head_commit.modified, ','), 'recommendation/')
     steps:
       - name: Checkout CI repo
         uses: actions/checkout@v3
@@ -58,29 +70,25 @@ jobs:
       - name: Docker Login to Docker Hub
         run: echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
 
-      # Build Frontend
-      - name: Build and Push Frontend
+      - name: Build & Push Frontend
         if: contains(join(github.event.head_commit.modified, ','), 'frontend/')
         run: |
           docker build -t $REGISTRY:frontend-latest ./frontend
           docker push $REGISTRY:frontend-latest
 
-      # Build Catalogue
-      - name: Build and Push Catalogue
+      - name: Build & Push Catalogue
         if: contains(join(github.event.head_commit.modified, ','), 'catalogue/')
         run: |
           docker build -t $REGISTRY:catalogue-latest ./catalogue
           docker push $REGISTRY:catalogue-latest
 
-      # Build Voting
-      - name: Build and Push Voting
+      - name: Build & Push Voting
         if: contains(join(github.event.head_commit.modified, ','), 'voting/')
         run: |
           docker build -t $REGISTRY:voting-latest ./voting
           docker push $REGISTRY:voting-latest
 
-      # Build Recommendation
-      - name: Build and Push Recommendation
+      - name: Build & Push Recommendation
         if: contains(join(github.event.head_commit.modified, ','), 'recommendation/')
         run: |
           docker build -t $REGISTRY:recommendation-latest ./recommendation
@@ -101,6 +109,6 @@ jobs:
           echo "${{ secrets.KUBECONFIG_DATA }}" | base64 -d > ~/.kube/config
           chmod 600 ~/.kube/config
 
-      - name: Deploy All Microservices
+      - name: Deploy to K8s
         run: |
           kubectl apply -f k8s-manifests/
