@@ -55,7 +55,10 @@ jobs:
               --query "Reservations[*].Instances[*].PublicIpAddress" --output text > instance_ips.txt
             echo "[INFO] Extracted IPs via AWS CLI:"
             cat instance_ips.txt
-            cp k8s-key.pem k8s-key.pem # Key already exists from Terraform
+            if [ ! -f k8s-key.pem ]; then
+              echo "[ERROR] Private key not found, cannot proceed"
+              exit 1
+            fi
           fi
 
       - name: Upload Artifacts for Next Job
