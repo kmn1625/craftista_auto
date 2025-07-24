@@ -35,20 +35,22 @@ jobs:
           terraform init
           terraform apply -auto-approve
 
-      - name: Extract Terraform Outputs with Retry
+      - name: Extract Terraform Outputs with Fallback
         run: |
           cd infra/
-          echo "Extracting outputs..."
-          sudo apt-get update && sudo apt-get install -y jq
+          sudo apt-get update && sudo apt-get install -y jq awscli
+          
+          echo "Extracting Terraform outputs..."
           MAX_RETRIES=10
           RETRY_INTERVAL=10
           for i in $(seq 1 $MAX_RETRIES); do
-            OUTPUT=$(terraform output -json || echo "")
+            terraform refresh || true
+            OUTPUT=$(terraform output -json 2>/dev/null || echo "")
             if echo "$OUTPUT" | jq empty 2>/dev/null; then
               echo "$OUTPUT" | jq -r '.instance_ips.value[]' > instance_ips.txt
               terraform output -raw private_key > k8s-key.pem
               chmod 600 k8s-key.pem
-              echo "IPs extracted:"
+              echo "IPs extracted from Terraform:"
               cat instance_ips.txt
               exit 0
             else
@@ -56,8 +58,19 @@ jobs:
               sleep $RETRY_INTERVAL
             fi
           done
-          echo "Failed to extract instance IPs or private key!"
-          exit 1
+
+          echo "Terraform output failed. Trying AWS CLI fallback..."
+          aws configure set region $AWS_REGION
+          aws ec2 describe-instances --filters "Name=tag:Name,Values=k8s-master,k8s-worker-*" \
+            --query 'Reservations[].Instances[].PublicIpAddress' --output text | tr '\t' '\n' > instance_ips.txt
+          
+          if [ -s instance_ips.txt ]; then
+            echo "IPs extracted via AWS CLI:"
+            cat instance_ips.txt
+          else
+            echo "Failed to extract IPs via Terraform and AWS CLI!"
+            exit 1
+          fi
 
       - name: Upload Artifacts for Next Job
         uses: actions/upload-artifact@v4
@@ -95,7 +108,7 @@ jobs:
   deploy_to_k8s:
     name: Deploy to Kubernetes
     runs-on: ubuntu-latest
-    needs: docker_build_push
+    needs: [docker_build_push]
     steps:
       - name: Checkout Repo
         uses: actions/checkout@v4
@@ -132,10 +145,10 @@ jobs:
           kubectl apply -f k8s-manifests/
 
   destroy_infra:
-    name: Destroy Infra Always
+    name: Rollback Infra if Failed
     runs-on: ubuntu-latest
-    if: always()
-    needs: [terraform_provision]
+    if: failure()
+    needs: [terraform_provision, docker_build_push, deploy_to_k8s]
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
