@@ -35,30 +35,22 @@ jobs:
           terraform init
           terraform apply -auto-approve
 
-      - name: Extract SSH Key & IPs
+      - name: Extract Outputs and Save Files
         run: |
           cd infra/
           sudo apt-get install -y jq
-          
-          if [ ! -f terraform.tfstate ]; then
-            echo "Terraform state not found! Exiting." && exit 1
-          fi
-          
-          INSTANCE_IPS_JSON=$(terraform output -json || echo "")
-          if [ -z "$INSTANCE_IPS_JSON" ]; then
-            echo "No instance IPs found!" && exit 1
-          fi
-          
-          # Flatten structure: Master IP + Worker IPs
-          echo "$INSTANCE_IPS_JSON" | jq -r '.instance_ips.value[0], .instance_ips.value[1][]' > instance_ips.txt
-          
+          INSTANCE_IPS=$(terraform output -json | jq -r '.instance_ips.value[]' || echo "")
           PRIVATE_KEY=$(terraform output -raw private_key || echo "")
-          if [ -z "$PRIVATE_KEY" ]; then
-            echo "No private key found!" && exit 1
+
+          if [ -z "$INSTANCE_IPS" ] || [ -z "$PRIVATE_KEY" ]; then
+            echo "Failed to extract instance IPs or private key!"
+            exit 1
           fi
+
+          echo "$INSTANCE_IPS" > instance_ips.txt
           echo "$PRIVATE_KEY" > k8s-key.pem
           chmod 600 k8s-key.pem
-          
+
           echo "Extracted IPs:"
           cat instance_ips.txt
 
@@ -85,20 +77,17 @@ jobs:
         run: |
           docker build -t $REGISTRY:frontend-latest ./frontend
           docker push $REGISTRY:frontend-latest
-
           docker build -t $REGISTRY:catalogue-latest ./catalogue
           docker push $REGISTRY:catalogue-latest
-
           docker build -t $REGISTRY:voting-latest ./voting
           docker push $REGISTRY:voting-latest
-
           docker build -t $REGISTRY:recommendation-latest ./recommendation
           docker push $REGISTRY:recommendation-latest
 
   deploy_to_k8s:
     name: Deploy to Kubernetes
     runs-on: ubuntu-latest
-    needs: docker_build_push
+    needs: [docker_build_push]
     steps:
       - name: Checkout Repo
         uses: actions/checkout@v4
@@ -109,7 +98,7 @@ jobs:
           name: k8s-artifacts
           path: ./infra
 
-      - name: Install SSH Client
+      - name: Install SSH Client & Set Permissions
         run: |
           sudo apt-get update && sudo apt-get install -y sshpass
           chmod 600 infra/k8s-key.pem
@@ -122,9 +111,11 @@ jobs:
 
           echo "Master: $MASTER_IP, Worker1: $WORKER1_IP, Worker2: $WORKER2_IP"
 
+          # Copy scripts
           scp -i infra/k8s-key.pem -o StrictHostKeyChecking=no infra/install_docker.sh ubuntu@$MASTER_IP:/home/ubuntu/
           scp -i infra/k8s-key.pem -o StrictHostKeyChecking=no infra/kube-install.sh ubuntu@$MASTER_IP:/home/ubuntu/
 
+          # Run setup
           ssh -i infra/k8s-key.pem -o StrictHostKeyChecking=no ubuntu@$MASTER_IP "bash install_docker.sh && bash kube-install.sh $WORKER1_IP $WORKER2_IP"
 
       - name: Deploy Microservices
@@ -135,9 +126,9 @@ jobs:
           kubectl apply -f k8s-manifests/
 
   destroy_infra:
-    name: Destroy Infra Always
+    name: Rollback Infra if Failed
     runs-on: ubuntu-latest
-    if: always() # Run even if pipeline fails
+    if: failure()
     needs: [terraform_provision, docker_build_push, deploy_to_k8s]
     steps:
       - name: Checkout repo
