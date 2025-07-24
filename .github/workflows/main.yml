@@ -35,7 +35,7 @@ jobs:
           terraform init
           terraform apply -auto-approve
 
-      # ✅ Step 1: Try Terraform Outputs
+      # ✅ Step 1: Try Terraform Outputs with Retry
       - name: Extract Terraform Outputs
         id: extract_tf
         continue-on-error: true
@@ -43,14 +43,24 @@ jobs:
           cd infra/
           sudo apt-get update && sudo apt-get install -y jq
           
-          echo "Attempting Terraform output extraction..."
-          if terraform output -json > outputs.json 2>/dev/null && jq empty outputs.json; then
-            jq -r '.instance_ips.value[]' outputs.json > instance_ips.txt
-            terraform output -raw private_key > k8s-key.pem
-            chmod 600 k8s-key.pem
-            echo "Terraform extraction successful"
-          else
-            echo "Terraform output failed"
+          echo "Attempting Terraform output extraction with retries..."
+          success=false
+          for i in {1..10}; do
+            if terraform output -json > outputs.json 2>/dev/null && jq empty outputs.json; then
+              echo "Valid JSON detected"
+              jq -r '.instance_ips.value[]' outputs.json > instance_ips.txt
+              terraform output -raw private_key > k8s-key.pem
+              chmod 600 k8s-key.pem
+              success=true
+              break
+            else
+              echo "Attempt $i: Invalid JSON, retrying in 10s..."
+              sleep 10
+            fi
+          done
+
+          if [ "$success" = false ]; then
+            echo "Terraform output failed after retries"
             exit 1
           fi
 
@@ -58,12 +68,20 @@ jobs:
       - name: AWS CLI Fallback for IP Extraction
         if: steps.extract_tf.outcome == 'failure'
         run: |
-          echo "Installing AWS CLI v2..."
-          curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-          unzip awscliv2.zip
-          sudo ./aws/install
+          echo "Terraform output failed, switching to AWS CLI fallback..."
           
+          # Check if AWS CLI is installed
+          if aws --version >/dev/null 2>&1; then
+            echo "AWS CLI already installed, skipping installation"
+          else
+            echo "Installing AWS CLI v2..."
+            curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+            unzip awscliv2.zip
+            sudo ./aws/install --update
+          fi
+
           echo "Fetching instance IPs using AWS CLI..."
+          mkdir -p infra
           aws ec2 describe-instances \
             --filters "Name=tag:Name,Values=k8s-master,k8s-worker-*" \
             --query 'Reservations[].Instances[].PublicIpAddress' \
