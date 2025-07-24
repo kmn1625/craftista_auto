@@ -35,37 +35,14 @@ jobs:
           terraform init
           terraform apply -auto-approve
 
-      - name: Extract Outputs and Save Files (with retry)
+      - name: Extract Terraform Outputs
         run: |
           cd infra/
           sudo apt-get install -y jq
 
-          echo "Waiting for Terraform outputs to be ready..."
-          for i in {1..5}; do
-            OUTPUT_JSON=$(terraform output -json 2>/dev/null || echo "")
-            if echo "$OUTPUT_JSON" | jq empty > /dev/null 2>&1; then
-              echo "Valid JSON received"
-              break
-            fi
-            echo "Attempt $i: Waiting 5 seconds before retry..."
-            sleep 5
-          done
-
-          if [ -z "$OUTPUT_JSON" ] || ! echo "$OUTPUT_JSON" | jq empty; then
-            echo "Failed to extract Terraform outputs after retries!"
-            exit 1
-          fi
-
-          INSTANCE_IPS=$(echo "$OUTPUT_JSON" | jq -r '.instance_ips.value[]' || echo "")
-          PRIVATE_KEY=$(terraform output -raw private_key || echo "")
-
-          if [ -z "$INSTANCE_IPS" ] || [ -z "$PRIVATE_KEY" ]; then
-            echo "Failed to extract instance IPs or private key!"
-            exit 1
-          fi
-
-          echo "$INSTANCE_IPS" > instance_ips.txt
-          echo "$PRIVATE_KEY" > k8s-key.pem
+          terraform output -json > tmp.json
+          jq -r '.instance_ips.value[]' tmp.json > instance_ips.txt
+          jq -r '.private_key.value' tmp.json > k8s-key.pem
           chmod 600 k8s-key.pem
 
           echo "Extracted IPs:"
@@ -94,10 +71,13 @@ jobs:
         run: |
           docker build -t $REGISTRY:frontend-latest ./frontend
           docker push $REGISTRY:frontend-latest
+
           docker build -t $REGISTRY:catalogue-latest ./catalogue
           docker push $REGISTRY:catalogue-latest
+
           docker build -t $REGISTRY:voting-latest ./voting
           docker push $REGISTRY:voting-latest
+
           docker build -t $REGISTRY:recommendation-latest ./recommendation
           docker push $REGISTRY:recommendation-latest
 
@@ -128,11 +108,9 @@ jobs:
 
           echo "Master: $MASTER_IP, Worker1: $WORKER1_IP, Worker2: $WORKER2_IP"
 
-          # Copy scripts
           scp -i infra/k8s-key.pem -o StrictHostKeyChecking=no infra/install_docker.sh ubuntu@$MASTER_IP:/home/ubuntu/
           scp -i infra/k8s-key.pem -o StrictHostKeyChecking=no infra/kube-install.sh ubuntu@$MASTER_IP:/home/ubuntu/
 
-          # Run setup
           ssh -i infra/k8s-key.pem -o StrictHostKeyChecking=no ubuntu@$MASTER_IP "bash install_docker.sh && bash kube-install.sh $WORKER1_IP $WORKER2_IP"
 
       - name: Deploy Microservices
