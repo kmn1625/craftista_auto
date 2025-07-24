@@ -113,6 +113,21 @@ jobs:
           sudo apt-get update && sudo apt-get install -y sshpass kubectl
           chmod 600 infra/k8s-key.pem
 
+      - name: Wait for EC2 Instances to be Ready
+        run: |
+          MASTER_IP=$(head -n 1 infra/instance_ips.txt | awk '{print $1}')
+          WORKER1_IP=$(sed -n '2p' infra/instance_ips.txt)
+          WORKER2_IP=$(sed -n '3p' infra/instance_ips.txt)
+
+          echo "[INFO] Waiting for EC2 instances to pass status checks..."
+          pip install awscli --upgrade
+          for ip in $MASTER_IP $WORKER1_IP $WORKER2_IP; do
+            INSTANCE_ID=$(aws ec2 describe-instances --filters "Name=ip-address,Values=$ip" --query "Reservations[*].Instances[*].InstanceId" --output text)
+            echo "[INFO] Checking $ip ($INSTANCE_ID)..."
+            aws ec2 wait instance-status-ok --instance-ids $INSTANCE_ID
+            echo "[INFO] $ip is ready!"
+          done
+
       - name: Setup Kubernetes Cluster via SSH
         run: |
           MASTER_IP=$(head -n 1 infra/instance_ips.txt | awk '{print $1}')
@@ -121,13 +136,8 @@ jobs:
 
           echo "Master: $MASTER_IP, Worker1: $WORKER1_IP, Worker2: $WORKER2_IP"
 
-          if [[ -z "$MASTER_IP" || -z "$WORKER1_IP" || -z "$WORKER2_IP" ]]; then
-            echo "❌ IP extraction failed. Check infra/instance_ips.txt"
-            exit 1
-          fi
-
           echo "[INFO] Waiting for SSH connectivity..."
-          for i in {1..10}; do
+          for i in {1..15}; do
             if ssh -i infra/k8s-key.pem -o StrictHostKeyChecking=no -o ConnectTimeout=10 ubuntu@$MASTER_IP "echo 'SSH OK'" 2>/dev/null; then
               echo "[INFO] SSH is ready!"
               break
