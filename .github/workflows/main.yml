@@ -35,40 +35,44 @@ jobs:
           terraform init
           terraform apply -auto-approve
 
-      - name: Extract Terraform Outputs with Fallback
+      # ✅ Step 1: Try Terraform Outputs
+      - name: Extract Terraform Outputs
+        id: extract_tf
+        continue-on-error: true
         run: |
           cd infra/
-          sudo apt-get update && sudo apt-get install -y jq awscli
+          sudo apt-get update && sudo apt-get install -y jq
           
-          echo "Extracting Terraform outputs..."
-          MAX_RETRIES=10
-          RETRY_INTERVAL=10
-          for i in $(seq 1 $MAX_RETRIES); do
-            terraform refresh || true
-            OUTPUT=$(terraform output -json 2>/dev/null || echo "")
-            if echo "$OUTPUT" | jq empty 2>/dev/null; then
-              echo "$OUTPUT" | jq -r '.instance_ips.value[]' > instance_ips.txt
-              terraform output -raw private_key > k8s-key.pem
-              chmod 600 k8s-key.pem
-              echo "IPs extracted from Terraform:"
-              cat instance_ips.txt
-              exit 0
-            else
-              echo "Attempt $i: Invalid JSON, retrying in ${RETRY_INTERVAL}s..."
-              sleep $RETRY_INTERVAL
-            fi
-          done
-
-          echo "Terraform output failed. Trying AWS CLI fallback..."
-          aws configure set region $AWS_REGION
-          aws ec2 describe-instances --filters "Name=tag:Name,Values=k8s-master,k8s-worker-*" \
-            --query 'Reservations[].Instances[].PublicIpAddress' --output text | tr '\t' '\n' > instance_ips.txt
-          
-          if [ -s instance_ips.txt ]; then
-            echo "IPs extracted via AWS CLI:"
-            cat instance_ips.txt
+          echo "Attempting Terraform output extraction..."
+          if terraform output -json > outputs.json 2>/dev/null && jq empty outputs.json; then
+            jq -r '.instance_ips.value[]' outputs.json > instance_ips.txt
+            terraform output -raw private_key > k8s-key.pem
+            chmod 600 k8s-key.pem
+            echo "Terraform extraction successful"
           else
-            echo "Failed to extract IPs via Terraform and AWS CLI!"
+            echo "Terraform output failed"
+            exit 1
+          fi
+
+      # ✅ Step 2: AWS CLI Fallback if Step 1 failed
+      - name: AWS CLI Fallback for IP Extraction
+        if: steps.extract_tf.outcome == 'failure'
+        run: |
+          echo "Installing AWS CLI v2..."
+          curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+          unzip awscliv2.zip
+          sudo ./aws/install
+          
+          echo "Fetching instance IPs using AWS CLI..."
+          aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=k8s-master,k8s-worker-*" \
+            --query 'Reservations[].Instances[].PublicIpAddress' \
+            --output text | tr '\t' '\n' > infra/instance_ips.txt
+          
+          if [ -s infra/instance_ips.txt ]; then
+            echo "AWS CLI fallback successful"
+          else
+            echo "AWS CLI fallback failed!"
             exit 1
           fi
 
