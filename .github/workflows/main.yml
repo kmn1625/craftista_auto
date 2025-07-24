@@ -45,13 +45,12 @@ jobs:
           fi
           
           INSTANCE_IPS_JSON=$(terraform output -json || echo "")
-          echo "$INSTANCE_IPS_JSON"
-          
           if [ -z "$INSTANCE_IPS_JSON" ]; then
             echo "No instance IPs found!" && exit 1
           fi
           
-          echo "$INSTANCE_IPS_JSON" | jq -r '.instance_ips.value[]' > instance_ips.txt
+          # Flatten structure: Master IP + Worker IPs
+          echo "$INSTANCE_IPS_JSON" | jq -r '.instance_ips.value[0], .instance_ips.value[1][]' > instance_ips.txt
           
           PRIVATE_KEY=$(terraform output -raw private_key || echo "")
           if [ -z "$PRIVATE_KEY" ]; then
