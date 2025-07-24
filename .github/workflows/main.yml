@@ -35,31 +35,28 @@ jobs:
           terraform init
           terraform apply -auto-approve
 
-      - name: Extract Terraform Outputs (with fallback)
+      - name: Extract Terraform Outputs with Fallback
         run: |
           cd infra/
-          echo "Attempting Terraform output extraction..."
+          echo "[INFO] Attempting Terraform output extraction..."
           set +e
-          terraform output -json instance_ips > instance_ips.json 2>/dev/null
-          terraform output -raw private_key > k8s-key.pem 2>/dev/null
-          set -e
-
-          if jq empty instance_ips.json >/dev/null 2>&1; then
-            echo "✅ Terraform outputs valid."
-            jq -r '.value[]' instance_ips.json > instance_ips.txt
+          terraform output -json > outputs.json
+          if jq -e . outputs.json >/dev/null 2>&1; then
+            jq -r '.instance_ips.value[]' outputs.json > instance_ips.txt
+            jq -r '.private_key.value' outputs.json > k8s-key.pem
+            chmod 600 k8s-key.pem
+            echo "[INFO] Extracted IPs:"
+            cat instance_ips.txt
+            set -e
           else
-            echo "❌ Terraform output failed, trying AWS CLI..."
-            pip install awscli --upgrade --quiet
-            INSTANCE_IDS=$(aws ec2 describe-instances \
-              --filters "Name=tag:Name,Values=k8s-*" \
-              --query "Reservations[].Instances[].InstanceId" --output text)
-            aws ec2 describe-instances --instance-ids $INSTANCE_IDS \
-              --query "Reservations[].Instances[].PublicIpAddress" --output text > instance_ips.txt
+            echo "[WARN] Terraform output failed, trying AWS CLI method..."
+            pip install --upgrade awscli
+            aws ec2 describe-instances --filters "Name=tag:Name,Values=k8s-*" \
+              --query "Reservations[*].Instances[*].PublicIpAddress" --output text > instance_ips.txt
+            echo "[INFO] Extracted IPs via AWS CLI:"
+            cat instance_ips.txt
+            cp k8s-key.pem k8s-key.pem # Key already exists from Terraform
           fi
-
-          chmod 600 k8s-key.pem
-          echo "IPs extracted:"
-          cat instance_ips.txt
 
       - name: Upload Artifacts for Next Job
         uses: actions/upload-artifact@v4
@@ -115,23 +112,57 @@ jobs:
 
       - name: Setup Kubernetes Cluster via SSH
         run: |
-          MASTER_IP=$(sed -n '1p' infra/instance_ips.txt)
+          MASTER_IP=$(head -n 1 infra/instance_ips.txt | awk '{print $1}')
           WORKER1_IP=$(sed -n '2p' infra/instance_ips.txt)
           WORKER2_IP=$(sed -n '3p' infra/instance_ips.txt)
 
           echo "Master: $MASTER_IP, Worker1: $WORKER1_IP, Worker2: $WORKER2_IP"
 
+          if [[ -z "$MASTER_IP" || -z "$WORKER1_IP" || -z "$WORKER2_IP" ]]; then
+            echo "❌ IP extraction failed. Check infra/instance_ips.txt"
+            exit 1
+          fi
+
+          echo "[INFO] Waiting for SSH connectivity..."
+          for i in {1..10}; do
+            if ssh -i infra/k8s-key.pem -o StrictHostKeyChecking=no -o ConnectTimeout=10 ubuntu@$MASTER_IP "echo 'SSH OK'" 2>/dev/null; then
+              echo "[INFO] SSH is ready!"
+              break
+            fi
+            echo "SSH attempt $i failed, retrying in 10s..."
+            sleep 10
+          done
+
+          echo "[INFO] Copying scripts..."
           scp -i infra/k8s-key.pem -o StrictHostKeyChecking=no infra/install_docker.sh ubuntu@$MASTER_IP:/home/ubuntu/
           scp -i infra/k8s-key.pem -o StrictHostKeyChecking=no infra/kube-install.sh ubuntu@$MASTER_IP:/home/ubuntu/
           scp -i infra/k8s-key.pem -o StrictHostKeyChecking=no infra/k8s-key.pem ubuntu@$MASTER_IP:/home/ubuntu/k8s-key.pem
 
-          ssh -i infra/k8s-key.pem -o StrictHostKeyChecking=no ubuntu@$MASTER_IP "bash install_docker.sh && bash kube-install.sh $WORKER1_IP $WORKER2_IP"
+          echo "[INFO] Running setup on Master..."
+          ssh -i infra/k8s-key.pem -o StrictHostKeyChecking=no ubuntu@$MASTER_IP "chmod +x install_docker.sh kube-install.sh && sudo bash install_docker.sh && sudo bash kube-install.sh $WORKER1_IP $WORKER2_IP"
+
+      - name: Wait for Kubernetes Nodes to be Ready
+        run: |
+          mkdir -p ~/.kube
+          scp -i infra/k8s-key.pem -o StrictHostKeyChecking=no ubuntu@$MASTER_IP:/home/ubuntu/.kube/config ~/.kube/config
+          export KUBECONFIG=~/.kube/config
+
+          echo "[INFO] Waiting for all nodes to be Ready..."
+          for i in {1..30}; do
+            READY=$(kubectl get nodes --no-headers | grep -c " Ready")
+            if [[ "$READY" -ge 3 ]]; then
+              echo "[INFO] All nodes are Ready!"
+              break
+            fi
+            echo "Attempt $i: Not all nodes ready yet..."
+            kubectl get nodes
+            sleep 10
+          done
 
       - name: Deploy Microservices
         run: |
-          mkdir -p ~/.kube
-          scp -i infra/k8s-key.pem -o StrictHostKeyChecking=no ubuntu@$(sed -n '1p' infra/instance_ips.txt):/home/ubuntu/.kube/config ~/.kube/config
           export KUBECONFIG=~/.kube/config
+          echo "[INFO] Applying Kubernetes manifests..."
           kubectl apply -f k8s-manifests/
 
   destroy_infra:
