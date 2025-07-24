@@ -35,11 +35,28 @@ jobs:
           terraform init
           terraform apply -auto-approve
 
-      - name: Extract Outputs and Save Files
+      - name: Extract Outputs and Save Files (with retry)
         run: |
           cd infra/
           sudo apt-get install -y jq
-          INSTANCE_IPS=$(terraform output -json | jq -r '.instance_ips.value[]' || echo "")
+
+          echo "Waiting for Terraform outputs to be ready..."
+          for i in {1..5}; do
+            OUTPUT_JSON=$(terraform output -json 2>/dev/null || echo "")
+            if echo "$OUTPUT_JSON" | jq empty > /dev/null 2>&1; then
+              echo "Valid JSON received"
+              break
+            fi
+            echo "Attempt $i: Waiting 5 seconds before retry..."
+            sleep 5
+          done
+
+          if [ -z "$OUTPUT_JSON" ] || ! echo "$OUTPUT_JSON" | jq empty; then
+            echo "Failed to extract Terraform outputs after retries!"
+            exit 1
+          fi
+
+          INSTANCE_IPS=$(echo "$OUTPUT_JSON" | jq -r '.instance_ips.value[]' || echo "")
           PRIVATE_KEY=$(terraform output -raw private_key || echo "")
 
           if [ -z "$INSTANCE_IPS" ] || [ -z "$PRIVATE_KEY" ]; then
