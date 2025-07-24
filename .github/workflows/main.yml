@@ -40,8 +40,30 @@ jobs:
           cd infra/
           sudo apt-get install -y jq
 
-          terraform output -json > tmp.json
-          jq -r '.instance_ips.value[]' tmp.json > instance_ips.txt
+          echo "Waiting for Terraform outputs..."
+          for i in {1..5}; do
+            terraform output -json > tmp.json
+            if jq empty tmp.json 2>/dev/null; then
+              break
+            fi
+            echo "Attempt $i: Invalid JSON, retrying in 5s..."
+            sleep 5
+          done
+
+          if [ ! -s tmp.json ]; then
+            echo "Terraform output JSON is empty. Exiting."
+            exit 1
+          fi
+
+          MASTER_IP=$(jq -r '.instance_ips.value[0]' tmp.json)
+          jq -r '.instance_ips.value[1][]' tmp.json > workers.txt
+          WORKER1_IP=$(sed -n '1p' workers.txt)
+          WORKER2_IP=$(sed -n '2p' workers.txt)
+
+          echo "$MASTER_IP" > instance_ips.txt
+          echo "$WORKER1_IP" >> instance_ips.txt
+          echo "$WORKER2_IP" >> instance_ips.txt
+
           jq -r '.private_key.value' tmp.json > k8s-key.pem
           chmod 600 k8s-key.pem
 
