@@ -51,7 +51,8 @@ jobs:
           else
             echo "[WARN] Terraform output failed, trying AWS CLI method..."
             pip install --upgrade awscli
-            aws ec2 describe-instances --filters "Name=tag:Name,Values=k8s-*" \
+            aws ec2 describe-instances --region $AWS_REGION \
+              --filters "Name=tag:Name,Values=k8s-*" \
               --query "Reservations[*].Instances[*].PublicIpAddress" --output text > instance_ips.txt
             echo "[INFO] Extracted IPs via AWS CLI:"
             cat instance_ips.txt
@@ -84,13 +85,10 @@ jobs:
         run: |
           docker build -t $REGISTRY:frontend-latest ./frontend
           docker push $REGISTRY:frontend-latest
-
           docker build -t $REGISTRY:catalogue-latest ./catalogue
           docker push $REGISTRY:catalogue-latest
-
           docker build -t $REGISTRY:voting-latest ./voting
           docker push $REGISTRY:voting-latest
-
           docker build -t $REGISTRY:recommendation-latest ./recommendation
           docker push $REGISTRY:recommendation-latest
 
@@ -122,9 +120,9 @@ jobs:
           echo "[INFO] Waiting for EC2 instances to pass status checks..."
           pip install awscli --upgrade
           for ip in $MASTER_IP $WORKER1_IP $WORKER2_IP; do
-            INSTANCE_ID=$(aws ec2 describe-instances --filters "Name=ip-address,Values=$ip" --query "Reservations[*].Instances[*].InstanceId" --output text)
+            INSTANCE_ID=$(aws ec2 describe-instances --region $AWS_REGION --filters "Name=ip-address,Values=$ip" --query "Reservations[*].Instances[*].InstanceId" --output text)
             echo "[INFO] Checking $ip ($INSTANCE_ID)..."
-            aws ec2 wait instance-status-ok --instance-ids $INSTANCE_ID
+            aws ec2 wait instance-status-ok --region $AWS_REGION --instance-ids $INSTANCE_ID
             echo "[INFO] $ip is ready!"
           done
 
@@ -134,8 +132,6 @@ jobs:
           WORKER1_IP=$(sed -n '2p' infra/instance_ips.txt)
           WORKER2_IP=$(sed -n '3p' infra/instance_ips.txt)
 
-          echo "Master: $MASTER_IP, Worker1: $WORKER1_IP, Worker2: $WORKER2_IP"
-
           echo "[INFO] Waiting for SSH connectivity..."
           for i in {1..15}; do
             if ssh -i infra/k8s-key.pem -o StrictHostKeyChecking=no -o ConnectTimeout=10 ubuntu@$MASTER_IP "echo 'SSH OK'" 2>/dev/null; then
@@ -144,6 +140,11 @@ jobs:
             fi
             echo "SSH attempt $i failed, retrying in 10s..."
             sleep 10
+            if [ "$i" -eq 15 ]; then
+              echo "[ERROR] SSH failed after 15 attempts. Destroying infrastructure..."
+              cd infra && terraform init && terraform destroy -auto-approve
+              exit 1
+            fi
           done
 
           echo "[INFO] Copying scripts..."
@@ -153,54 +154,3 @@ jobs:
 
           echo "[INFO] Running setup on Master..."
           ssh -i infra/k8s-key.pem -o StrictHostKeyChecking=no ubuntu@$MASTER_IP "chmod +x install_docker.sh kube-install.sh && sudo bash install_docker.sh && sudo bash kube-install.sh $WORKER1_IP $WORKER2_IP"
-
-      - name: Wait for Kubernetes Nodes to be Ready
-        run: |
-          mkdir -p ~/.kube
-          scp -i infra/k8s-key.pem -o StrictHostKeyChecking=no ubuntu@$MASTER_IP:/home/ubuntu/.kube/config ~/.kube/config
-          export KUBECONFIG=~/.kube/config
-
-          echo "[INFO] Waiting for all nodes to be Ready..."
-          for i in {1..30}; do
-            READY=$(kubectl get nodes --no-headers | grep -c " Ready")
-            if [[ "$READY" -ge 3 ]]; then
-              echo "[INFO] All nodes are Ready!"
-              break
-            fi
-            echo "Attempt $i: Not all nodes ready yet..."
-            kubectl get nodes
-            sleep 10
-          done
-
-      - name: Deploy Microservices
-        run: |
-          export KUBECONFIG=~/.kube/config
-          echo "[INFO] Applying Kubernetes manifests..."
-          kubectl apply -f k8s-manifests/
-
-  destroy_infra:
-    name: Rollback Infra if Failed
-    runs-on: ubuntu-latest
-    if: failure()
-    needs: [terraform_provision, docker_build_push, deploy_to_k8s]
-    steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v2
-        with:
-          terraform_version: 1.6.6
-
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v2
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
-
-      - name: Destroy Infra
-        run: |
-          cd infra/
-          terraform init
-          terraform destroy -auto-approve
