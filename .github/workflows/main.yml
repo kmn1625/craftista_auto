@@ -35,64 +35,31 @@ jobs:
           terraform init
           terraform apply -auto-approve
 
-      # ✅ Step 1: Try Terraform Outputs with Retry
-      - name: Extract Terraform Outputs
-        id: extract_tf
-        continue-on-error: true
+      - name: Extract Terraform Outputs (with fallback)
         run: |
           cd infra/
-          sudo apt-get update && sudo apt-get install -y jq
-          
-          echo "Attempting Terraform output extraction with retries..."
-          success=false
-          for i in {1..10}; do
-            if terraform output -json > outputs.json 2>/dev/null && jq empty outputs.json; then
-              echo "Valid JSON detected"
-              jq -r '.instance_ips.value[]' outputs.json > instance_ips.txt
-              terraform output -raw private_key > k8s-key.pem
-              chmod 600 k8s-key.pem
-              success=true
-              break
-            else
-              echo "Attempt $i: Invalid JSON, retrying in 10s..."
-              sleep 10
-            fi
-          done
+          echo "Attempting Terraform output extraction..."
+          set +e
+          terraform output -json instance_ips > instance_ips.json 2>/dev/null
+          terraform output -raw private_key > k8s-key.pem 2>/dev/null
+          set -e
 
-          if [ "$success" = false ]; then
-            echo "Terraform output failed after retries"
-            exit 1
-          fi
-
-      # ✅ Step 2: AWS CLI Fallback if Step 1 failed
-      - name: AWS CLI Fallback for IP Extraction
-        if: steps.extract_tf.outcome == 'failure'
-        run: |
-          echo "Terraform output failed, switching to AWS CLI fallback..."
-          
-          # Check if AWS CLI is installed
-          if aws --version >/dev/null 2>&1; then
-            echo "AWS CLI already installed, skipping installation"
+          if jq empty instance_ips.json >/dev/null 2>&1; then
+            echo "✅ Terraform outputs valid."
+            jq -r '.value[]' instance_ips.json > instance_ips.txt
           else
-            echo "Installing AWS CLI v2..."
-            curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-            unzip awscliv2.zip
-            sudo ./aws/install --update
+            echo "❌ Terraform output failed, trying AWS CLI..."
+            pip install awscli --upgrade --quiet
+            INSTANCE_IDS=$(aws ec2 describe-instances \
+              --filters "Name=tag:Name,Values=k8s-*" \
+              --query "Reservations[].Instances[].InstanceId" --output text)
+            aws ec2 describe-instances --instance-ids $INSTANCE_IDS \
+              --query "Reservations[].Instances[].PublicIpAddress" --output text > instance_ips.txt
           fi
 
-          echo "Fetching instance IPs using AWS CLI..."
-          mkdir -p infra
-          aws ec2 describe-instances \
-            --filters "Name=tag:Name,Values=k8s-master,k8s-worker-*" \
-            --query 'Reservations[].Instances[].PublicIpAddress' \
-            --output text | tr '\t' '\n' > infra/instance_ips.txt
-          
-          if [ -s infra/instance_ips.txt ]; then
-            echo "AWS CLI fallback successful"
-          else
-            echo "AWS CLI fallback failed!"
-            exit 1
-          fi
+          chmod 600 k8s-key.pem
+          echo "IPs extracted:"
+          cat instance_ips.txt
 
       - name: Upload Artifacts for Next Job
         uses: actions/upload-artifact@v4
@@ -141,9 +108,9 @@ jobs:
           name: k8s-artifacts
           path: ./infra
 
-      - name: Install SSH Client
+      - name: Install SSH Client & kubectl
         run: |
-          sudo apt-get update && sudo apt-get install -y sshpass
+          sudo apt-get update && sudo apt-get install -y sshpass kubectl
           chmod 600 infra/k8s-key.pem
 
       - name: Setup Kubernetes Cluster via SSH
@@ -156,13 +123,14 @@ jobs:
 
           scp -i infra/k8s-key.pem -o StrictHostKeyChecking=no infra/install_docker.sh ubuntu@$MASTER_IP:/home/ubuntu/
           scp -i infra/k8s-key.pem -o StrictHostKeyChecking=no infra/kube-install.sh ubuntu@$MASTER_IP:/home/ubuntu/
+          scp -i infra/k8s-key.pem -o StrictHostKeyChecking=no infra/k8s-key.pem ubuntu@$MASTER_IP:/home/ubuntu/k8s-key.pem
 
           ssh -i infra/k8s-key.pem -o StrictHostKeyChecking=no ubuntu@$MASTER_IP "bash install_docker.sh && bash kube-install.sh $WORKER1_IP $WORKER2_IP"
 
       - name: Deploy Microservices
         run: |
           mkdir -p ~/.kube
-          scp -i infra/k8s-key.pem -o StrictHostKeyChecking=no ubuntu@$(sed -n '1p' infra/instance_ips.txt):/home/ubuntu/admin.conf ~/.kube/config
+          scp -i infra/k8s-key.pem -o StrictHostKeyChecking=no ubuntu@$(sed -n '1p' infra/instance_ips.txt):/home/ubuntu/.kube/config ~/.kube/config
           export KUBECONFIG=~/.kube/config
           kubectl apply -f k8s-manifests/
 
