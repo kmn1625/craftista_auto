@@ -14,7 +14,7 @@ resource "local_file" "private_key" {
   filename = "${path.module}/k8s-key.pem"
 }
 
-# Add randomness to avoid duplicate name issues
+# Add randomness to resource names
 resource "random_pet" "suffix" {}
 
 # Create AWS key pair
@@ -56,21 +56,22 @@ resource "aws_security_group" "k8s_sg" {
   }
 }
 
-# Master Node
+# Create Kubernetes master node
 resource "aws_instance" "master" {
-  ami                         = "ami-020cba7c55df1f615" # Ubuntu 22.04
+  ami                         = "ami-020cba7c55df1f615"
   instance_type               = "t2.medium"
   key_name                    = aws_key_pair.k8s_key.key_name
   vpc_security_group_ids      = [aws_security_group.k8s_sg.id]
   associate_public_ip_address = true
-  user_data                   = file("${path.module}/install_docker.sh")
+
+  user_data = file("${path.module}/install_docker.sh")
 
   tags = {
     Name = "k8s-master"
   }
 }
 
-# Worker Nodes
+# Create worker nodes
 resource "aws_instance" "workers" {
   count                       = 2
   ami                         = "ami-020cba7c55df1f615"
@@ -78,26 +79,25 @@ resource "aws_instance" "workers" {
   key_name                    = aws_key_pair.k8s_key.key_name
   vpc_security_group_ids      = [aws_security_group.k8s_sg.id]
   associate_public_ip_address = true
-  user_data                   = file("${path.module}/install_docker.sh")
+
+  user_data = file("${path.module}/install_docker.sh")
 
   tags = {
     Name = "k8s-worker-${count.index + 1}"
   }
 }
 
-# -------------------
-# Outputs for CI/CD
-# -------------------
-
-# Flatten IP list for easy jq parsing
+# Outputs
 output "instance_ips" {
-  value = flatten([
-    aws_instance.master.*.public_ip,
-    aws_instance.workers.*.public_ip
+  value = jsonencode([
+    aws_instance.master.public_ip,
+    [
+      aws_instance.workers[0].public_ip,
+      aws_instance.workers[1].public_ip
+    ]
   ])
 }
 
-# Private SSH Key
 output "private_key" {
   value     = tls_private_key.k8s_key.private_key_pem
   sensitive = true
