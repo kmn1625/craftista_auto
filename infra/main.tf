@@ -14,7 +14,7 @@ resource "local_file" "private_key" {
   filename = "${path.module}/k8s-key.pem"
 }
 
-# Add randomness to resource names
+# Add randomness to avoid duplicate name issues
 resource "random_pet" "suffix" {}
 
 # Create AWS key pair
@@ -56,22 +56,21 @@ resource "aws_security_group" "k8s_sg" {
   }
 }
 
-# Kubernetes master node
+# Master Node
 resource "aws_instance" "master" {
   ami                         = "ami-020cba7c55df1f615" # Ubuntu 22.04
   instance_type               = "t2.medium"
   key_name                    = aws_key_pair.k8s_key.key_name
   vpc_security_group_ids      = [aws_security_group.k8s_sg.id]
   associate_public_ip_address = true
-
-  user_data = file("${path.module}/install_docker.sh")
+  user_data                   = file("${path.module}/install_docker.sh")
 
   tags = {
     Name = "k8s-master"
   }
 }
 
-# Two worker nodes
+# Worker Nodes
 resource "aws_instance" "workers" {
   count                       = 2
   ami                         = "ami-020cba7c55df1f615"
@@ -79,8 +78,7 @@ resource "aws_instance" "workers" {
   key_name                    = aws_key_pair.k8s_key.key_name
   vpc_security_group_ids      = [aws_security_group.k8s_sg.id]
   associate_public_ip_address = true
-
-  user_data = file("${path.module}/install_docker.sh")
+  user_data                   = file("${path.module}/install_docker.sh")
 
   tags = {
     Name = "k8s-worker-${count.index + 1}"
@@ -88,16 +86,19 @@ resource "aws_instance" "workers" {
 }
 
 # -------------------
-# Outputs (Flat List)
+# Outputs for CI/CD
 # -------------------
 
+# Flatten IP list for easy jq parsing
 output "instance_ips" {
-  description = "Flat list of all node IPs: [Master, Worker1, Worker2]"
-  value       = concat([aws_instance.master.public_ip], aws_instance.workers[*].public_ip)
+  value = flatten([
+    aws_instance.master.*.public_ip,
+    aws_instance.workers.*.public_ip
+  ])
 }
 
+# Private SSH Key
 output "private_key" {
-  description = "Private key for SSH"
-  value       = tls_private_key.k8s_key.private_key_pem
-  sensitive   = true
+  value     = tls_private_key.k8s_key.private_key_pem
+  sensitive = true
 }
