@@ -26,19 +26,26 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: Terraform Init
-        run: cd infra && terraform init
-
-      - name: Terraform Apply
-        run: cd infra && terraform apply -auto-approve
-
       - name: Extract IPs & Prepare Files
         run: |
           cd infra
-          terraform output -json instance_ips | jq -r '.value[]' > instance_ips.txt
+          echo "[INFO] Extracting instance IPs..."
+          OUTPUT=$(terraform output -json instance_ips || echo "")
+    
+          if [ -z "$OUTPUT" ]; then
+             echo "[ERROR] Terraform output is empty. Check apply step."
+             exit 1
+          fi
+    
+          echo "$OUTPUT" | jq -r '.value[]' > instance_ips.txt || {
+          echo "[ERROR] Failed to parse IPs from Terraform output."
+          exit 1
+          }
+    
           chmod 400 k8s-key.pem
           echo "[INFO] Extracted IPs:"
           cat instance_ips.txt
+
 
       - name: Upload Infra Files as Artifact
         uses: actions/upload-artifact@v4
