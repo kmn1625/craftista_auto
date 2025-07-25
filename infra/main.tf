@@ -1,32 +1,23 @@
-terraform {
-  required_providers {
-    aws = {
-      source  = "hashicorp/aws"
-      version = "~> 5.0"
-    }
-  }
-  required_version = ">= 1.5.0"
-}
-
 provider "aws" {
-  region     = "us-east-1"
+  region = "us-east-1"
 }
 
-# Generate SSH Key Pair
+# Generate SSH key pair
 resource "tls_private_key" "k8s_key" {
   algorithm = "RSA"
   rsa_bits  = 4096
 }
 
+# Save private key locally
 resource "local_file" "private_key" {
   content  = tls_private_key.k8s_key.private_key_pem
   filename = "${path.module}/k8s-key.pem"
-  file_permission = "0600"
 }
 
+# Random suffix for uniqueness
 resource "random_pet" "suffix" {}
 
-# AWS Key Pair
+# Create AWS Key Pair
 resource "aws_key_pair" "k8s_key" {
   key_name   = "k8s-key-${random_pet.suffix.id}"
   public_key = tls_private_key.k8s_key.public_key_openssh
@@ -37,9 +28,10 @@ data "aws_vpc" "default" {
   default = true
 }
 
-# Security Group for Kubernetes
+# Security Group
 resource "aws_security_group" "k8s_sg" {
   name        = "k8s-cluster-sg-${random_pet.suffix.id}"
+  description = "Security group for Kubernetes cluster"
   vpc_id      = data.aws_vpc.default.id
 
   ingress {
@@ -52,13 +44,6 @@ resource "aws_security_group" "k8s_sg" {
   ingress {
     from_port   = 6443
     to_port     = 6443
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  ingress {
-    from_port   = 30000
-    to_port     = 32767
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
@@ -78,6 +63,7 @@ resource "aws_instance" "master" {
   key_name                    = aws_key_pair.k8s_key.key_name
   vpc_security_group_ids      = [aws_security_group.k8s_sg.id]
   associate_public_ip_address = true
+  user_data                   = file("${path.module}/install_docker.sh")
 
   tags = {
     Name = "k8s-master"
@@ -92,14 +78,20 @@ resource "aws_instance" "workers" {
   key_name                    = aws_key_pair.k8s_key.key_name
   vpc_security_group_ids      = [aws_security_group.k8s_sg.id]
   associate_public_ip_address = true
+  user_data                   = file("${path.module}/install_docker.sh")
 
   tags = {
     Name = "k8s-worker-${count.index + 1}"
   }
 }
 
+# ✅ Outputs (explicit map for jq)
 output "instance_ips" {
-  value = concat([aws_instance.master.public_ip], aws_instance.workers[*].public_ip)
+  value = {
+    master  = aws_instance.master.public_ip
+    worker1 = aws_instance.workers[0].public_ip
+    worker2 = aws_instance.workers[1].public_ip
+  }
 }
 
 output "private_key" {
