@@ -13,111 +13,97 @@ jobs:
       REGISTRY: kmn1624/craftista
 
     steps:
-      - name: Checkout Code
+      - name: Checkout code
         uses: actions/checkout@v3
 
-      - name: Install Dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y unzip jq sshpass curl
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v2
         with:
-          terraform_version: 1.6.6
+          terraform_version: 1.5.7
 
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v2
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Initialize & Apply Terraform
+      - name: Terraform Init & Apply
         run: |
           cd infra
           terraform init
           terraform apply -auto-approve
 
-      - name: Extract Instance Details (Terraform → jq → AWS CLI Fallback)
+      - name: Extract Instance Details (Robust Parsing)
         id: extract
         run: |
           echo "[INFO] Attempting Terraform output extraction..."
           cd infra
-          if terraform output -json instance_ips &> tf_output.json; then
-            if jq -e . tf_output.json >/dev/null 2>&1; then
-              echo "[INFO] Extracting IPs from Terraform output..."
-              jq -r '.value[]' tf_output.json > instance_ips.txt
-              jq -r '.private_key.value' tf_output.json > k8s-key.pem
-            else
-              echo "[ERROR] Invalid JSON from Terraform output."
-              exit 1
-            fi
-          else
-            echo "[WARN] Terraform output failed, trying AWS CLI fallback..."
-            cd ..
-            pip install --upgrade pip
-            pip install awscli
-            if ! aws ec2 describe-instances --region $AWS_REGION --query 'Reservations[*].Instances[*].PublicIpAddress' --output text > infra/instance_ips.txt; then
-              echo "[ERROR] AWS CLI fallback failed. Exiting."
-              exit 1
-            fi
-          fi
-          chmod 600 infra/k8s-key.pem || true
-          echo "[INFO] Extracted IPs:"
-          cat infra/instance_ips.txt
+          terraform output -json > tf_output.json || echo "{}" > tf_output.json
 
-      - name: Prepare Environment Variables
-        run: |
-          MASTER_IP=$(sed -n '1p' infra/instance_ips.txt)
-          WORKER1_IP=$(sed -n '2p' infra/instance_ips.txt)
-          WORKER2_IP=$(sed -n '3p' infra/instance_ips.txt)
-          echo "MASTER_IP=$MASTER_IP" >> $GITHUB_ENV
-          echo "WORKER1_IP=$WORKER1_IP" >> $GITHUB_ENV
-          echo "WORKER2_IP=$WORKER2_IP" >> $GITHUB_ENV
-          echo "[INFO] Master: $MASTER_IP, Worker1: $WORKER1_IP, Worker2: $WORKER2_IP"
+          echo "[DEBUG] Terraform output:"
+          cat tf_output.json
+
+          # Extract any IP addresses recursively
+          jq -r '.. | scalars | select(test("^[0-9]{1,3}(\\.[0-9]{1,3}){3}$"))' tf_output.json > instance_ips.txt || true
+
+          if [ ! -s instance_ips.txt ]; then
+            echo "[WARN] No IPs from Terraform. Using AWS CLI fallback..."
+            cd ..
+            sudo apt-get update && sudo apt-get install -y python3-pip
+            pip3 install awscli
+            aws configure set aws_access_key_id ${{ secrets.AWS_ACCESS_KEY_ID }}
+            aws configure set aws_secret_access_key ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+            aws configure set region $AWS_REGION
+
+            aws ec2 describe-instances \
+              --filters "Name=tag:Name,Values=k8s-node*" "Name=instance-state-name,Values=running" \
+              --query 'Reservations[*].Instances[*].PublicIpAddress' \
+              --output text > infra/instance_ips.txt
+          fi
+
+          # Extract SSH key
+          jq -r '.. | objects | .private_key? // empty' tf_output.json > k8s-key.pem || true
+          chmod 600 k8s-key.pem || true
+          mv k8s-key.pem infra/ || true
+
+          echo "[INFO] Extracted IPs:"
+          cat instance_ips.txt
 
       - name: Wait for SSH Connectivity
         run: |
-          ATTEMPTS=0
-          MAX_ATTEMPTS=15
-          until ssh -i infra/k8s-key.pem -o StrictHostKeyChecking=no ubuntu@$MASTER_IP 'echo "SSH Connected"' 2>/dev/null; do
-            ATTEMPTS=$((ATTEMPTS+1))
-            echo "[INFO] SSH attempt $ATTEMPTS failed, retrying in 10s..."
-            if [ $ATTEMPTS -ge $MAX_ATTEMPTS ]; then
-              echo "[ERROR] SSH connection failed after $MAX_ATTEMPTS attempts. Destroying infra..."
-              cd infra && terraform destroy -auto-approve
-              exit 1
+          cd infra
+          MASTER_IP=$(sed -n '1p' instance_ips.txt)
+          echo "[INFO] Master Node: $MASTER_IP"
+
+          for i in {1..15}; do
+            if ssh -i k8s-key.pem -o StrictHostKeyChecking=no ubuntu@$MASTER_IP "echo connected"; then
+              echo "[INFO] SSH Connected."
+              exit 0
             fi
-            sleep 10
+            echo "[WARN] SSH attempt $i failed. Retrying in 15s..."
+            sleep 15
           done
-          echo "[INFO] SSH connectivity established."
 
-      - name: Copy Scripts to Master
+          echo "[ERROR] SSH failed after 15 attempts. Destroying infrastructure."
+          terraform destroy -auto-approve
+          exit 1
+
+      - name: Install Dependencies
         run: |
+          sudo apt-get update && sudo apt-get install -y sshpass curl
+
+      - name: Configure Master & Workers
+        run: |
+          cd infra
+          MASTER_IP=$(sed -n '1p' instance_ips.txt)
+          WORKER1_IP=$(sed -n '2p' instance_ips.txt)
+          WORKER2_IP=$(sed -n '3p' instance_ips.txt)
+          echo "[INFO] Master: $MASTER_IP, Worker1: $WORKER1_IP, Worker2: $WORKER2_IP"
+
           echo "[INFO] Copying scripts..."
-          scp -i infra/k8s-key.pem -o StrictHostKeyChecking=no infra/install_docker.sh ubuntu@$MASTER_IP:/home/ubuntu/
-          scp -i infra/k8s-key.pem -o StrictHostKeyChecking=no infra/kube-install.sh ubuntu@$MASTER_IP:/home/ubuntu/
-          scp -i infra/k8s-key.pem -o StrictHostKeyChecking=no infra/k8s-key.pem ubuntu@$MASTER_IP:/home/ubuntu/k8s-key.pem
+          scp -i k8s-key.pem -o StrictHostKeyChecking=no install_docker.sh ubuntu@$MASTER_IP:/home/ubuntu/
+          scp -i k8s-key.pem -o StrictHostKeyChecking=no kube-install.sh ubuntu@$MASTER_IP:/home/ubuntu/
+          scp -i k8s-key.pem -o StrictHostKeyChecking=no k8s-key.pem ubuntu@$MASTER_IP:/home/ubuntu/k8s-key.pem
 
-      - name: Setup Kubernetes on Master
-        run: |
           echo "[INFO] Running setup on Master..."
-          ssh -i infra/k8s-key.pem -o StrictHostKeyChecking=no ubuntu@$MASTER_IP "
-            chmod +x install_docker.sh kube-install.sh &&
-            sudo bash install_docker.sh &&
-            sudo bash kube-install.sh $WORKER1_IP $WORKER2_IP
-          "
+          ssh -i k8s-key.pem -o StrictHostKeyChecking=no ubuntu@$MASTER_IP "chmod +x install_docker.sh kube-install.sh && sudo bash install_docker.sh && sudo bash kube-install.sh $WORKER1_IP $WORKER2_IP"
 
-      - name: Deploy Manifests
+      - name: Deploy Microservices
         run: |
-          echo "[INFO] Deploying microservices..."
-          ssh -i infra/k8s-key.pem -o StrictHostKeyChecking=no ubuntu@$MASTER_IP "
-            kubectl apply -f /home/ubuntu/manifests/
-          "
-
-      - name: Destroy Infrastructure on Completion
-        if: always()
-        run: |
-          echo "[INFO] Destroying infrastructure..."
-          cd infra && terraform destroy -auto-approve
+          echo "[INFO] Deploying Microservices to Kubernetes..."
+          cd manifests
+          kubectl apply -f .
