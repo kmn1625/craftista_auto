@@ -10,6 +10,9 @@ on:
       - 'voting/**'
       - 'recommendation/**'
 
+env:
+  REGISTRY: kmn1624/craftista
+
 jobs:
   docker_build_push:
     runs-on: ubuntu-latest
@@ -17,12 +20,17 @@ jobs:
       - name: Checkout Repo
         uses: actions/checkout@v4
 
-      # ✅ Download infra artifacts (k8s-key.pem and instance_ips.txt)
+      # ✅ Download the correct artifact (from Infra pipeline)
       - name: Download Infra Artifacts
         uses: actions/download-artifact@v4
         with:
-          name: infra-files
-          path: infra/
+          name: k8s-artifacts   # ✅ Matches the name in infra workflow
+          path: infra/          # ✅ Download into infra directory
+
+      - name: Verify Artifacts
+        run: |
+          echo "[INFO] Downloaded infra artifacts:"
+          ls -l infra/
 
       - name: Docker Login
         run: echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
