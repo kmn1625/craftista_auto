@@ -1,4 +1,4 @@
-name: Provision Infra and Deploy K8s
+name: Deploy Kubernetes Cluster & Microservices
 
 on:
   push:
@@ -8,106 +8,116 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    outputs:
-      infra_provisioned: ${{ steps.provision.outputs.done }}
+    env:
+      AWS_REGION: us-east-1
+      REGISTRY: kmn1624/craftista
+
     steps:
-      - name: Checkout Repository
+      - name: Checkout Code
         uses: actions/checkout@v3
 
-      - name: Install Terraform & AWS CLI
+      - name: Install Dependencies
         run: |
-          sudo apt-get update && sudo apt-get install -y unzip curl python3-pip
-          TERRAFORM_VERSION="1.6.6"
-          curl -sSL -o terraform.zip "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip"
-          unzip terraform.zip
-          sudo mv terraform /usr/local/bin/
-          terraform version
-          pip install --upgrade pip && pip install awscli --quiet
+          sudo apt-get update
+          sudo apt-get install -y unzip jq sshpass curl
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.6
 
       - name: Configure AWS Credentials
-        run: |
-          aws configure set aws_access_key_id "${{ secrets.AWS_ACCESS_KEY_ID }}"
-          aws configure set aws_secret_access_key "${{ secrets.AWS_SECRET_ACCESS_KEY }}"
-          aws configure set default.region "${{ secrets.AWS_REGION }}"
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
 
       - name: Initialize & Apply Terraform
-        id: provision
-        working-directory: infra
         run: |
-          terraform init -input=false
-          terraform apply -auto-approve -input=false
-          echo "done=true" >> $GITHUB_OUTPUT
+          cd infra
+          terraform init
+          terraform apply -auto-approve
 
-      - name: Extract Instance IPs (Fallback Logic)
-        id: extract-ips
+      - name: Extract Instance Details (Terraform → jq → AWS CLI Fallback)
+        id: extract
         run: |
-          mkdir -p infra
-          if terraform -chdir=infra output -json | jq -r '.instance_ips.value[]' > infra/instance_ips.txt 2>/dev/null; then
-            echo "[INFO] IPs extracted using Terraform"
+          echo "[INFO] Attempting Terraform output extraction..."
+          cd infra
+          if terraform output -json instance_ips &> tf_output.json; then
+            if jq -e . tf_output.json >/dev/null 2>&1; then
+              echo "[INFO] Extracting IPs from Terraform output..."
+              jq -r '.value[]' tf_output.json > instance_ips.txt
+              jq -r '.private_key.value' tf_output.json > k8s-key.pem
+            else
+              echo "[ERROR] Invalid JSON from Terraform output."
+              exit 1
+            fi
           else
-            echo "[WARN] Terraform output failed. Trying AWS CLI fallback..."
-            INSTANCE_IDS=$(terraform -chdir=infra output -raw instance_ids | tr -d '[],"')
-            aws ec2 describe-instances --instance-ids $INSTANCE_IDS \
-              --query "Reservations[*].Instances[*].PublicIpAddress" \
-              --output text | tr '\t' '\n' > infra/instance_ips.txt
-            cat infra/instance_ips.txt
+            echo "[WARN] Terraform output failed, trying AWS CLI fallback..."
+            cd ..
+            pip install --upgrade pip
+            pip install awscli
+            if ! aws ec2 describe-instances --region $AWS_REGION --query 'Reservations[*].Instances[*].PublicIpAddress' --output text > infra/instance_ips.txt; then
+              echo "[ERROR] AWS CLI fallback failed. Exiting."
+              exit 1
+            fi
           fi
+          chmod 600 infra/k8s-key.pem || true
+          echo "[INFO] Extracted IPs:"
+          cat infra/instance_ips.txt
 
-      - name: Install SSH Client & kubectl
-        run: |
-          sudo apt-get install -y sshpass curl
-          K8S_VERSION=$(curl -s https://dl.k8s.io/release/stable.txt || echo "v1.29.0")
-          curl -sSL --retry 5 -o kubectl "https://dl.k8s.io/release/$K8S_VERSION/bin/linux/amd64/kubectl"
-          sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
-
-      - name: Provision Kubernetes Cluster
+      - name: Prepare Environment Variables
         run: |
           MASTER_IP=$(sed -n '1p' infra/instance_ips.txt)
           WORKER1_IP=$(sed -n '2p' infra/instance_ips.txt)
           WORKER2_IP=$(sed -n '3p' infra/instance_ips.txt)
-          echo "[INFO] Waiting for SSH connectivity..."
-          RETRIES=0
-          while ! ssh -o StrictHostKeyChecking=no -i infra/k8s-key.pem ubuntu@$MASTER_IP "echo OK" >/dev/null 2>&1; do
-            RETRIES=$((RETRIES+1))
-            if [ $RETRIES -ge 15 ]; then
-              echo "[ERROR] SSH connectivity failed after 15 attempts"
+          echo "MASTER_IP=$MASTER_IP" >> $GITHUB_ENV
+          echo "WORKER1_IP=$WORKER1_IP" >> $GITHUB_ENV
+          echo "WORKER2_IP=$WORKER2_IP" >> $GITHUB_ENV
+          echo "[INFO] Master: $MASTER_IP, Worker1: $WORKER1_IP, Worker2: $WORKER2_IP"
+
+      - name: Wait for SSH Connectivity
+        run: |
+          ATTEMPTS=0
+          MAX_ATTEMPTS=15
+          until ssh -i infra/k8s-key.pem -o StrictHostKeyChecking=no ubuntu@$MASTER_IP 'echo "SSH Connected"' 2>/dev/null; do
+            ATTEMPTS=$((ATTEMPTS+1))
+            echo "[INFO] SSH attempt $ATTEMPTS failed, retrying in 10s..."
+            if [ $ATTEMPTS -ge $MAX_ATTEMPTS ]; then
+              echo "[ERROR] SSH connection failed after $MAX_ATTEMPTS attempts. Destroying infra..."
+              cd infra && terraform destroy -auto-approve
               exit 1
             fi
             sleep 10
           done
+          echo "[INFO] SSH connectivity established."
+
+      - name: Copy Scripts to Master
+        run: |
+          echo "[INFO] Copying scripts..."
           scp -i infra/k8s-key.pem -o StrictHostKeyChecking=no infra/install_docker.sh ubuntu@$MASTER_IP:/home/ubuntu/
           scp -i infra/k8s-key.pem -o StrictHostKeyChecking=no infra/kube-install.sh ubuntu@$MASTER_IP:/home/ubuntu/
           scp -i infra/k8s-key.pem -o StrictHostKeyChecking=no infra/k8s-key.pem ubuntu@$MASTER_IP:/home/ubuntu/k8s-key.pem
-          ssh -i infra/k8s-key.pem -o StrictHostKeyChecking=no ubuntu@$MASTER_IP "chmod +x install_docker.sh kube-install.sh && sudo bash install_docker.sh && sudo bash kube-install.sh $WORKER1_IP $WORKER2_IP"
 
-      - name: Deploy Microservices
+      - name: Setup Kubernetes on Master
         run: |
-          MASTER_IP=$(sed -n '1p' infra/instance_ips.txt)
-          scp -i infra/k8s-key.pem -o StrictHostKeyChecking=no -r k8s-manifests ubuntu@$MASTER_IP:/home/ubuntu/
-          ssh -i infra/k8s-key.pem -o StrictHostKeyChecking=no ubuntu@$MASTER_IP "kubectl apply -f k8s-manifests/"
+          echo "[INFO] Running setup on Master..."
+          ssh -i infra/k8s-key.pem -o StrictHostKeyChecking=no ubuntu@$MASTER_IP "
+            chmod +x install_docker.sh kube-install.sh &&
+            sudo bash install_docker.sh &&
+            sudo bash kube-install.sh $WORKER1_IP $WORKER2_IP
+          "
 
-  cleanup:
-    runs-on: ubuntu-latest
-    needs: deploy
-    if: failure() && needs.deploy.outputs.infra_provisioned == 'true'
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v3
-
-      - name: Install Terraform & AWS CLI
+      - name: Deploy Manifests
         run: |
-          sudo apt-get update && sudo apt-get install -y unzip curl python3-pip
-          pip install --upgrade pip && pip install awscli
-          curl -sSL -o terraform.zip "https://releases.hashicorp.com/terraform/1.6.6/terraform_1.6.6_linux_amd64.zip"
-          unzip terraform.zip
-          sudo mv terraform /usr/local/bin/
-          terraform version
-          aws configure set aws_access_key_id "${{ secrets.AWS_ACCESS_KEY_ID }}"
-          aws configure set aws_secret_access_key "${{ secrets.AWS_SECRET_ACCESS_KEY }}"
-          aws configure set default.region "${{ secrets.AWS_REGION }}"
+          echo "[INFO] Deploying microservices..."
+          ssh -i infra/k8s-key.pem -o StrictHostKeyChecking=no ubuntu@$MASTER_IP "
+            kubectl apply -f /home/ubuntu/manifests/
+          "
 
-      - name: Destroy Infrastructure
-        working-directory: infra
+      - name: Destroy Infrastructure on Completion
+        if: always()
         run: |
-          echo "[INFO] Cleaning up resources..."
-          terraform destroy -auto-approve
+          echo "[INFO] Destroying infrastructure..."
+          cd infra && terraform destroy -auto-approve
