@@ -1,88 +1,61 @@
-name: Infra
+name: Provision Infrastructure
 
 on:
   push:
-    branches: [main]
+    paths:
+      - 'infra/**'
+      - '.github/workflows/provision_infra.yaml'
   workflow_dispatch:
-
-env:
-  REGISTRY: kmn1624/craftista
-  AWS_REGION: ${{ secrets.AWS_REGION }}
 
 jobs:
   terraform_provision:
-    name: Provision Infra
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout repo
+      - name: Checkout Code
         uses: actions/checkout@v4
 
       - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v2
-        with:
-          terraform_version: 1.6.6
+        uses: hashicorp/setup-terraform@v3
 
       - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v2
+        uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
+          aws-region: us-east-1
 
-      - name: Terraform Init & Apply
+      - name: Terraform Init
+        working-directory: infra
+        run: terraform init
+
+      - name: Terraform Apply
+        id: apply
+        working-directory: infra
+        run: terraform apply -auto-approve
+
+      - name: Extract IPs & Save Key
+        if: success()
         run: |
-          cd infra/
-          terraform init
-          terraform apply -auto-approve
+          cd infra
+          terraform output -json instance_ips | jq -r '.[]' > instance_ips.txt
+          cp k8s-key.pem ./k8s-key.pem
 
-      - name: Extract Terraform Outputs with Fallback
+      - name: Push Infra State to infra-state Branch
+        if: success()
         run: |
-          cd infra/
-          echo "[INFO] Attempting Terraform output extraction..."
-          set +e
-          terraform output -json > outputs.json
-          if jq -e . outputs.json >/dev/null 2>&1; then
-            jq -r '.instance_ips.value[]' outputs.json > instance_ips.txt
-            jq -r '.private_key.value' outputs.json > k8s-key.pem
-            chmod 600 k8s-key.pem
-            echo "[INFO] Extracted IPs from Terraform output:"
-            cat instance_ips.txt
-            set -e
-          else
-            echo "[WARN] Terraform output failed, using AWS CLI fallback..."
-            python3 -m pip install --user awscli
-            export PATH=$PATH:~/.local/bin
-            export AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}
-            export AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}
-            export AWS_REGION=${{ secrets.AWS_REGION }}
+          git config --global user.email "actions@github.com"
+          git config --global user.name "GitHub Actions"
+          git fetch origin
+          git checkout --orphan infra-state || git checkout infra-state
+          mkdir -p infra
+          cp infra/instance_ips.txt infra/k8s-key.pem infra/
+          git add infra/*
+          git commit -m "Update infra files"
+          git push origin infra-state --force
 
-            ips=$(aws ec2 describe-instances \
-              --region "$AWS_REGION" \
-              --filters "Name=tag:Name,Values=k8s-*" \
-              --query "Reservations[*].Instances[*].PublicIpAddress" \
-              --output text)
-
-            if [ -z "$ips" ]; then
-              echo "[ERROR] No instance IPs found. Destroying infra..."
-              terraform destroy -auto-approve
-              exit 1
-            fi
-
-            echo "$ips" | tr '\t' '\n' > instance_ips.txt
-            echo "[INFO] Extracted IPs via AWS CLI:"
-            cat instance_ips.txt
-
-            if [ ! -f k8s-key.pem ]; then
-              echo "[ERROR] Private key not found from Terraform outputs. Destroying infra..."
-              terraform destroy -auto-approve
-              exit 1
-            fi
-          fi
-
-      - name: Upload Artifacts for Next Job
-        uses: actions/upload-artifact@v4
-        with:
-          name: k8s-artifacts
-          path: |
-            infra/k8s-key.pem
-            infra/instance_ips.txt
+      - name: Destroy on Failure
+        if: failure()
+        run: |
+          cd infra
+          terraform destroy -auto-approve
