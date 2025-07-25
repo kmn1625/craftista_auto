@@ -1,35 +1,52 @@
 name: Deploy to Kubernetes
 
 on:
-  push:
-    paths:
-      - 'k8s/**'
-      - '.github/workflows/deploy_k8s.yaml'
   workflow_dispatch:
+  workflow_run:
+    workflows: ["Build and Push Docker Images"]
+    types:
+      - completed
 
 jobs:
   deploy_k8s:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout Repo
         uses: actions/checkout@v4
 
-      - name: Fetch Infra Files
+      # ✅ Download infra artifacts (IPs and key)
+      - name: Download Infra Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: k8s-artifacts
+          path: infra/
+
+      - name: Verify Artifacts
         run: |
-          git fetch origin infra-state
-          git checkout infra-state -- infra/
+          echo "[INFO] Artifacts downloaded:"
           ls -l infra/
+          cat infra/instance_ips.txt
 
-      - name: Setup SSH
+      - name: Install SSH Client & K8s Tools
         run: |
-          chmod 600 infra/k8s-key.pem
+          sudo apt-get update
+          sudo apt-get install -y sshpass curl
+          curl -LO "https://dl.k8s.io/release/$(curl -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x kubectl
+          sudo mv kubectl /usr/local/bin/
 
-      - name: Deploy Manifests to Master Node
-        env:
-          REGISTRY: ${{ secrets.DOCKER_USERNAME }}/craftista
+      - name: Deploy Kubernetes Manifests
         run: |
-          MASTER_IP=$(sed -n '1p' infra/instance_ips.txt)
-          echo "[INFO] Deploying to Master: $MASTER_IP"
-          scp -i infra/k8s-key.pem -o StrictHostKeyChecking=no -r k8s ubuntu@$MASTER_IP:/home/ubuntu/
-          ssh -i infra/k8s-key.pem -o StrictHostKeyChecking=no ubuntu@$MASTER_IP "kubectl apply -f /home/ubuntu/k8s/"
+          MASTER_IP=$(head -n 1 infra/instance_ips.txt)
+          echo "[INFO] Connecting to Master Node: $MASTER_IP"
+          chmod 400 infra/k8s-key.pem
+
+          # Copy manifests to master node
+          scp -o StrictHostKeyChecking=no -i infra/k8s-key.pem ./k8s/*.yaml ubuntu@$MASTER_IP:/home/ubuntu/
+
+          # Apply manifests remotely
+          ssh -o StrictHostKeyChecking=no -i infra/k8s-key.pem ubuntu@$MASTER_IP << 'EOF'
+            echo "[INFO] Applying Kubernetes manifests..."
+            kubectl apply -f /home/ubuntu/
+            echo "[INFO] Kubernetes deployment completed."
+          EOF
