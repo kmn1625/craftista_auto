@@ -1,33 +1,42 @@
-name: Docker Build & Push
+name: Build and Push Docker Images
 
 on:
-  workflow_dispatch: # Manual trigger
   push:
-    branches:
-      - main
+    paths:
+      - 'frontend/**'
+      - 'catalogue/**'
+      - 'voting/**'
+      - 'recommendation/**'
+      - '**/Dockerfile'
+      - '.github/workflows/build_push_images.yaml'
+  workflow_dispatch:
 
 jobs:
   docker_build_push:
-    name: Build and Push Docker Images
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout Repo
         uses: actions/checkout@v4
+
+      - name: Fetch Infra Files
+        run: |
+          git fetch origin infra-state
+          git checkout infra-state -- infra/
+          ls -l infra/
 
       - name: Docker Login
         run: echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
 
       - name: Build & Push Images
+        env:
+          REGISTRY: ${{ secrets.DOCKER_USERNAME }}/craftista
         run: |
-          echo "[INFO] Starting Docker build and push..."
-          docker build -t ${{ secrets.DOCKER_USERNAME }}/craftista:frontend-latest ./frontend
-          docker push ${{ secrets.DOCKER_USERNAME }}/craftista:frontend-latest
-
-          docker build -t ${{ secrets.DOCKER_USERNAME }}/craftista:catalogue-latest ./catalogue
-          docker push ${{ secrets.DOCKER_USERNAME }}/craftista:catalogue-latest
-
-          docker build -t ${{ secrets.DOCKER_USERNAME }}/craftista:voting-latest ./voting
-          docker push ${{ secrets.DOCKER_USERNAME }}/craftista:voting-latest
-
-          docker build -t ${{ secrets.DOCKER_USERNAME }}/craftista:recommendation-latest ./recommendation
-          docker push ${{ secrets.DOCKER_USERNAME }}/craftista:recommendation-latest
+          docker build -t $REGISTRY:frontend-latest ./frontend
+          docker push $REGISTRY:frontend-latest
+          docker build -t $REGISTRY:catalogue-latest ./catalogue
+          docker push $REGISTRY:catalogue-latest
+          docker build -t $REGISTRY:voting-latest ./voting
+          docker push $REGISTRY:voting-latest
+          docker build -t $REGISTRY:recommendation-latest ./recommendation
+          docker push $REGISTRY:recommendation-latest
