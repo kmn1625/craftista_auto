@@ -32,15 +32,15 @@ jobs:
       - name: Terraform Apply
         run: cd infra && terraform apply -auto-approve
 
-      # ✅ Extract IPs and Prepare Files
-      - name: Extract IPs
+      - name: Extract IPs & Prepare Files
         run: |
           cd infra
-          terraform output -json instance_ips | jq -r '.[]' > instance_ips.txt
+          terraform output -json instance_ips | jq -r '.value[]' > instance_ips.txt
           chmod 400 k8s-key.pem
+          echo "[INFO] Extracted IPs:"
+          cat instance_ips.txt
 
-      # ✅ Upload infra artifacts
-      - name: Upload Infra Files
+      - name: Upload Infra Files as Artifact
         uses: actions/upload-artifact@v4
         with:
           name: infra-files
