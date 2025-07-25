@@ -1,41 +1,47 @@
 #!/bin/bash
 set -e
 
-WORKER1=$1
-WORKER2=$2
-SSH_KEY="/home/ubuntu/k8s-key.pem"
+WORKER1_IP=$1
+WORKER2_IP=$2
 
 echo "[INFO] Installing Kubernetes components..."
-sudo apt-get update && sudo apt-get install -y apt-transport-https curl
-curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo apt-key add -
-cat <<EOF | sudo tee /etc/apt/sources.list.d/kubernetes.list
-deb https://apt.kubernetes.io/ kubernetes-xenial main
-EOF
-sudo apt-get update
-sudo apt-get install -y kubelet kubeadm kubectl
-sudo apt-mark hold kubelet kubeadm kubectl
 
-echo "[INFO] Initializing Kubernetes Master..."
+# Update system
+sudo apt-get update && sudo apt-get install -y apt-transport-https curl
+
+# Fetch stable Kubernetes version safely
+K8S_VERSION=$(curl -fsSL https://dl.k8s.io/release/stable.txt || echo "v1.29.0")
+if [[ -z "$K8S_VERSION" || "$K8S_VERSION" != v* ]]; then
+  echo "[WARN] Failed to fetch stable version, using fallback v1.29.0"
+  K8S_VERSION="v1.29.0"
+fi
+echo "[INFO] Using Kubernetes version: $K8S_VERSION"
+
+# Install kubectl
+curl -fsSLo kubectl "https://dl.k8s.io/release/${K8S_VERSION}/bin/linux/amd64/kubectl"
+chmod +x kubectl
+sudo mv kubectl /usr/local/bin/
+kubectl version --client
+
+# Install kubeadm, kubelet, kubernetes-cni
+sudo apt-get install -y kubeadm kubelet kubernetes-cni
+
+# Initialize master
 sudo kubeadm init --pod-network-cidr=10.244.0.0/16
 
+# Configure kubectl for ubuntu user
 mkdir -p $HOME/.kube
 sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
 sudo chown $(id -u):$(id -g) $HOME/.kube/config
 
-echo "[INFO] Installing Flannel CNI..."
+# Install Flannel network
 kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml
 
+# Get join command
 JOIN_CMD=$(kubeadm token create --print-join-command)
 echo "[INFO] Join command: $JOIN_CMD"
 
-echo "[INFO] Copying SSH key and joining workers..."
-chmod 600 $SSH_KEY
-for NODE in $WORKER1 $WORKER2; do
-  ssh -i $SSH_KEY -o StrictHostKeyChecking=no ubuntu@$NODE "sudo apt-get update && sudo apt-get install -y apt-transport-https curl"
-  ssh -i $SSH_KEY -o StrictHostKeyChecking=no ubuntu@$NODE "curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo apt-key add -"
-  ssh -i $SSH_KEY -o StrictHostKeyChecking=no ubuntu@$NODE "echo 'deb https://apt.kubernetes.io/ kubernetes-xenial main' | sudo tee /etc/apt/sources.list.d/kubernetes.list"
-  ssh -i $SSH_KEY -o StrictHostKeyChecking=no ubuntu@$NODE "sudo apt-get update && sudo apt-get install -y kubelet kubeadm kubectl && sudo apt-mark hold kubelet kubeadm kubectl"
-  ssh -i $SSH_KEY -o StrictHostKeyChecking=no ubuntu@$NODE "sudo $JOIN_CMD"
-done
-
-echo "[INFO] Kubernetes cluster setup completed successfully."
+# Copy SSH key and join workers
+chmod 600 /home/ubuntu/k8s-key.pem
+ssh -o StrictHostKeyChecking=no -i /home/ubuntu/k8s-key.pem ubuntu@$WORKER1_IP "sudo $JOIN_CMD"
+ssh -o StrictHostKeyChecking=no -i /home/ubuntu/k8s-key.pem ubuntu@$WORKER2_IP "sudo $JOIN_CMD"
