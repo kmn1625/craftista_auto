@@ -46,13 +46,14 @@ jobs:
             exit 1
           fi
 
-          # Validate JSON
+          # Validate JSON format
           echo "$OUTPUT" | jq empty || {
             echo "[ERROR] Terraform output is not valid JSON."
             exit 1
           }
 
-          echo "$OUTPUT" | jq -r '.value[]' > instance_ips.txt
+          # Extract values from the map (master, worker1, worker2)
+          echo "$OUTPUT" | jq -r '.master, .worker1, .worker2' > instance_ips.txt
 
           if [ ! -s instance_ips.txt ]; then
             echo "[ERROR] No IPs found in Terraform output."
