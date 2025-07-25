@@ -1,0 +1,50 @@
+name: Deploy Kubernetes
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Download Infra Files
+        uses: actions/download-artifact@v4
+        with:
+          name: infra-files
+          path: infra/
+
+      - name: Verify Artifacts
+        run: |
+          if [ ! -f infra/instance_ips.txt ] || [ ! -f infra/k8s-key.pem ]; then
+            echo "Required infra files missing!"
+            exit 1
+          fi
+
+      - name: Read IP Addresses
+        run: |
+          MASTER_IP=$(sed -n '1p' infra/instance_ips.txt)
+          WORKER1_IP=$(sed -n '2p' infra/instance_ips.txt)
+          WORKER2_IP=$(sed -n '3p' infra/instance_ips.txt)
+          echo "MASTER_IP=$MASTER_IP" >> $GITHUB_ENV
+          echo "WORKER1_IP=$WORKER1_IP" >> $GITHUB_ENV
+          echo "WORKER2_IP=$WORKER2_IP" >> $GITHUB_ENV
+
+      - name: Install SSH Tools
+        run: sudo apt-get update && sudo apt-get install -y sshpass
+
+      - name: Copy Setup Scripts
+        run: |
+          ssh -i infra/k8s-key.pem -o StrictHostKeyChecking=no ubuntu@$MASTER_IP "mkdir -p ~/setup"
+          scp -i infra/k8s-key.pem -o StrictHostKeyChecking=no infra/install_docker.sh infra/kube-install.sh infra/k8s-key.pem ubuntu@$MASTER_IP:~/setup/
+
+      - name: Run Setup Scripts
+        run: |
+          ssh -i infra/k8s-key.pem -o StrictHostKeyChecking=no ubuntu@$MASTER_IP "chmod +x ~/setup/*.sh && sudo bash ~/setup/install_docker.sh && sudo bash ~/setup/kube-install.sh $WORKER1_IP $WORKER2_IP"
+
+      - name: Deploy Kubernetes Manifests
+        run: |
+          scp -i infra/k8s-key.pem -o StrictHostKeyChecking=no -r manifests ubuntu@$MASTER_IP:/home/ubuntu/
+          ssh -i infra/k8s-key.pem -o StrictHostKeyChecking=no ubuntu@$MASTER_IP "kubectl apply -f manifests/"
