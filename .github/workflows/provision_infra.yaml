@@ -1,0 +1,38 @@
+name: Provision Infrastructure
+
+on:
+  workflow_dispatch:
+
+jobs:
+  provision:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v2
+
+      - name: Initialize Terraform
+        run: |
+          cd infra
+          terraform init
+
+      - name: Apply Terraform
+        run: |
+          cd infra
+          terraform apply -auto-approve
+
+      - name: Extract Terraform Outputs
+        run: |
+          cd infra
+          terraform output -json > tf_output.json
+          jq -r '.instance_ips.value[]' tf_output.json > instance_ips.txt
+          jq -r '.private_key.value' tf_output.json > k8s-key.pem
+          chmod 600 k8s-key.pem
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: infra-files
+          path: infra/instance_ips.txt, infra/k8s-key.pem
