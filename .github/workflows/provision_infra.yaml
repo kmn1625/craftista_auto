@@ -1,61 +1,45 @@
 name: Provision Infrastructure
 
 on:
+  workflow_dispatch:
   push:
     paths:
       - 'infra/**'
-      - '.github/workflows/provision_infra.yaml'
-  workflow_dispatch:
 
 jobs:
   terraform_provision:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout Code
+      - name: Checkout Repo
         uses: actions/checkout@v4
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.0
 
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-east-1
+          aws-region: ${{ secrets.AWS_REGION }}
 
       - name: Terraform Init
-        working-directory: infra
-        run: terraform init
+        run: cd infra && terraform init
 
       - name: Terraform Apply
-        id: apply
-        working-directory: infra
-        run: terraform apply -auto-approve
+        run: cd infra && terraform apply -auto-approve
 
-      - name: Extract IPs & Save Key
-        if: success()
+      - name: Extract Instance IPs
         run: |
           cd infra
           terraform output -json instance_ips | jq -r '.[]' > instance_ips.txt
-          cp k8s-key.pem ./k8s-key.pem
 
-      - name: Push Infra State to infra-state Branch
-        if: success()
-        run: |
-          git config --global user.email "actions@github.com"
-          git config --global user.name "GitHub Actions"
-          git fetch origin
-          git checkout --orphan infra-state || git checkout infra-state
-          mkdir -p infra
-          cp infra/instance_ips.txt infra/k8s-key.pem infra/
-          git add infra/*
-          git commit -m "Update infra files"
-          git push origin infra-state --force
-
-      - name: Destroy on Failure
-        if: failure()
-        run: |
-          cd infra
-          terraform destroy -auto-approve
+      - name: Upload Infra Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: infra-files
+          path: |
+            infra/instance_ips.txt
+            infra/k8s-key.pem
