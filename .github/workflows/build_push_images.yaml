@@ -1,36 +1,33 @@
 name: Build and Push Docker Images
 
 on:
+  workflow_dispatch:
   push:
     paths:
+      - 'Dockerfile'
       - 'frontend/**'
       - 'catalogue/**'
       - 'voting/**'
       - 'recommendation/**'
-      - '**/Dockerfile'
-      - '.github/workflows/build_push_images.yaml'
-  workflow_dispatch:
 
 jobs:
   docker_build_push:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout Repo
         uses: actions/checkout@v4
 
-      - name: Fetch Infra Files
-        run: |
-          git fetch origin infra-state
-          git checkout infra-state -- infra/
-          ls -l infra/
+      # ✅ Download infra artifacts (k8s-key.pem and instance_ips.txt)
+      - name: Download Infra Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: infra-files
+          path: infra/
 
       - name: Docker Login
         run: echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
 
       - name: Build & Push Images
-        env:
-          REGISTRY: ${{ secrets.DOCKER_USERNAME }}/craftista
         run: |
           docker build -t $REGISTRY:frontend-latest ./frontend
           docker push $REGISTRY:frontend-latest
