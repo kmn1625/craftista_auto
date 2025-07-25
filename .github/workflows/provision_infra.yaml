@@ -1,53 +1,69 @@
-name: Provision Infra
+name: Terraform Provision Infrastructure
 
 on:
   workflow_dispatch:
   push:
     paths:
       - 'infra/**'
-      - '.github/workflows/terraform_provision.yaml'
 
 jobs:
   terraform_provision:
     runs-on: ubuntu-latest
+
+    env:
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
     steps:
       - name: Checkout Repo
         uses: actions/checkout@v4
 
       - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v2
+        uses: hashicorp/setup-terraform@v3
         with:
-          terraform_version: 1.7.5
+          terraform_version: 1.8.0
 
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
+      - name: Terraform Init
+        run: |
+          cd infra
+          terraform init
 
-      - name: Extract IPs & Prepare Files
+      - name: Terraform Apply
+        run: |
+          cd infra
+          terraform apply -auto-approve
+
+      - name: Extract IPs & Validate Output
         run: |
           cd infra
           echo "[INFO] Extracting instance IPs..."
           OUTPUT=$(terraform output -json instance_ips || echo "")
-    
+
           if [ -z "$OUTPUT" ]; then
-             echo "[ERROR] Terraform output is empty. Check apply step."
-             exit 1
+            echo "[ERROR] Terraform output is empty. Check apply step."
+            exit 1
           fi
-    
-          echo "$OUTPUT" | jq -r '.value[]' > instance_ips.txt || {
-          echo "[ERROR] Failed to parse IPs from Terraform output."
-          exit 1
+
+          # Validate JSON
+          echo "$OUTPUT" | jq empty || {
+            echo "[ERROR] Terraform output is not valid JSON."
+            exit 1
           }
-    
+
+          echo "$OUTPUT" | jq -r '.value[]' > instance_ips.txt
+
+          if [ ! -s instance_ips.txt ]; then
+            echo "[ERROR] No IPs found in Terraform output."
+            exit 1
+          fi
+
           chmod 400 k8s-key.pem
           echo "[INFO] Extracted IPs:"
           cat instance_ips.txt
 
-
-      - name: Upload Infra Files as Artifact
+      - name: Upload Infra Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: infra-files
