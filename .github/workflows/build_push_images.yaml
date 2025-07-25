@@ -23,7 +23,7 @@ jobs:
 
       - name: Build & Push Image for ${{ matrix.service }}
         run: |
-          IMAGE_NAME="${{ secrets.DOCKER_USERNAME }}/craftista:${{ matrix.service }}-latest"
+          IMAGE_NAME="${{ secrets.DOCKER_USERNAME }}/craftista_auto:${{ matrix.service }}-latest"
           DOCKERFILE="Dockerfile.${{ matrix.service }}"
           echo "[INFO] Building and pushing $IMAGE_NAME using $DOCKERFILE"
           docker build -t $IMAGE_NAME -f $DOCKERFILE .
