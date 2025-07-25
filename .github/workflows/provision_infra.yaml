@@ -1,73 +1,88 @@
-name: Terraform Provision Infrastructure
+name: Infra
 
 on:
-  workflow_dispatch:
   push:
-    paths:
-      - 'infra/**'
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  REGISTRY: kmn1624/craftista
+  AWS_REGION: ${{ secrets.AWS_REGION }}
 
 jobs:
   terraform_provision:
+    name: Provision Infra
     runs-on: ubuntu-latest
-
-    env:
-      AWS_DEFAULT_REGION: us-east-1
-      AWS_REGION: us-east-1
-      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-
     steps:
-      - name: Checkout Repo
+      - name: Checkout repo
         uses: actions/checkout@v4
 
       - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
+        uses: hashicorp/setup-terraform@v2
         with:
-          terraform_version: 1.8.0
+          terraform_version: 1.6.6
 
-      - name: Terraform Init
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Terraform Init & Apply
         run: |
-          cd infra
+          cd infra/
           terraform init
-
-      - name: Terraform Apply
-        run: |
-          cd infra
           terraform apply -auto-approve
 
-      - name: Extract IPs & Validate Output
+      - name: Extract Terraform Outputs with Fallback
         run: |
-          cd infra
-          echo "[INFO] Extracting instance IPs..."
-          OUTPUT=$(terraform output -json instance_ips || echo "")
+          cd infra/
+          echo "[INFO] Attempting Terraform output extraction..."
+          set +e
+          terraform output -json > outputs.json
+          if jq -e . outputs.json >/dev/null 2>&1; then
+            jq -r '.instance_ips.value[]' outputs.json > instance_ips.txt
+            jq -r '.private_key.value' outputs.json > k8s-key.pem
+            chmod 600 k8s-key.pem
+            echo "[INFO] Extracted IPs from Terraform output:"
+            cat instance_ips.txt
+            set -e
+          else
+            echo "[WARN] Terraform output failed, using AWS CLI fallback..."
+            python3 -m pip install --user awscli
+            export PATH=$PATH:~/.local/bin
+            export AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}
+            export AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}
+            export AWS_REGION=${{ secrets.AWS_REGION }}
 
-          if [ -z "$OUTPUT" ]; then
-            echo "[ERROR] Terraform output is empty. Check apply step."
-            exit 1
+            ips=$(aws ec2 describe-instances \
+              --region "$AWS_REGION" \
+              --filters "Name=tag:Name,Values=k8s-*" \
+              --query "Reservations[*].Instances[*].PublicIpAddress" \
+              --output text)
+
+            if [ -z "$ips" ]; then
+              echo "[ERROR] No instance IPs found. Destroying infra..."
+              terraform destroy -auto-approve
+              exit 1
+            fi
+
+            echo "$ips" | tr '\t' '\n' > instance_ips.txt
+            echo "[INFO] Extracted IPs via AWS CLI:"
+            cat instance_ips.txt
+
+            if [ ! -f k8s-key.pem ]; then
+              echo "[ERROR] Private key not found from Terraform outputs. Destroying infra..."
+              terraform destroy -auto-approve
+              exit 1
+            fi
           fi
 
-          # Validate JSON format
-          echo "$OUTPUT" | jq empty || {
-            echo "[ERROR] Terraform output is not valid JSON."
-            exit 1
-          }
-
-          # Extract values from the map (master, worker1, worker2)
-          echo "$OUTPUT" | jq -r '.master, .worker1, .worker2' > instance_ips.txt
-
-          if [ ! -s instance_ips.txt ]; then
-            echo "[ERROR] No IPs found in Terraform output."
-            exit 1
-          fi
-
-          chmod 400 k8s-key.pem
-          echo "[INFO] Extracted IPs:"
-          cat instance_ips.txt
-
-      - name: Upload Infra Artifacts
+      - name: Upload Artifacts for Next Job
         uses: actions/upload-artifact@v4
         with:
-          name: infra-files
+          name: k8s-artifacts
           path: |
-            infra/instance_ips.txt
             infra/k8s-key.pem
+            infra/instance_ips.txt
