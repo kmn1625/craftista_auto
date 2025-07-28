@@ -1,6 +1,7 @@
 name: Build and Push Docker Images
 
 on:
+  workflow_dispatch:
   push:
     paths:
       - 'Dockerfile'
@@ -8,7 +9,6 @@ on:
       - 'catalogue/**'
       - 'voting/**'
       - 'recommendation/**'
-  workflow_dispatch:
 
 env:
   REGISTRY: kmn1624/craftista
@@ -20,23 +20,21 @@ jobs:
       - name: Checkout Repo
         uses: actions/checkout@v4
 
-      - name: Fetch Infra-State Branch
-        run: |
-          git fetch origin infra-state
-          git checkout infra-state -- infra-state/
-          ls -l infra-state
+      - name: Download Infra Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: k8s-artifacts
+          path: infra/
 
-      - name: Move Artifacts to Infra Folder
+      - name: Verify Download
         run: |
-          mkdir -p infra
-          cp infra-state/instance_ips.txt infra/
-          cp infra-state/k8s-key.pem infra/
-          chmod 600 infra/k8s-key.pem
+          echo "[INFO] Artifacts downloaded:"
+          ls -l infra/
 
       - name: Docker Login
         run: echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
 
-      - name: Build & Push Images
+      - name: Build & Push Docker Images
         run: |
           docker build -t $REGISTRY:frontend-latest ./frontend
           docker push $REGISTRY:frontend-latest
