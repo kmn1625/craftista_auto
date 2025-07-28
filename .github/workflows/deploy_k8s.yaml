@@ -1,12 +1,10 @@
-name: Deploy to Kubernetes
+name: Deploy Kubernetes on EC2
 
 on:
-  workflow_run:
-    workflows: ["Infra"]
-    types: [completed]
   push:
     paths:
       - 'k8s/**'
+      - '.github/workflows/deploy_k8s.yaml'
   workflow_dispatch:
 
 jobs:
@@ -16,16 +14,20 @@ jobs:
       - name: Checkout Repo
         uses: actions/checkout@v4
 
-      - name: Download Infra Artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: k8s-artifacts
-          path: infra/
+      - name: Fetch Infra-State Branch
+        run: |
+          git fetch origin infra-state
+          git checkout infra-state -- infra-state/
+          ls -l infra-state
 
-      - name: Verify Artifacts
-        run: ls -l infra/
+      - name: Move Artifacts
+        run: |
+          mkdir -p infra
+          cp infra-state/instance_ips.txt infra/
+          cp infra-state/k8s-key.pem infra/
+          chmod 600 infra/k8s-key.pem
 
-      - name: Install SSH & kubectl
+      - name: Install SSH & Kubectl
         run: |
           sudo apt-get update
           sudo apt-get install -y sshpass curl
@@ -33,13 +35,25 @@ jobs:
           chmod +x kubectl
           sudo mv kubectl /usr/local/bin/
 
-      - name: Deploy Kubernetes Manifests
+      - name: Deploy Kubernetes Cluster
+        run: |
+          echo "[INFO] Starting Kubernetes setup..."
+          IPS=$(cat infra/instance_ips.txt)
+          MASTER_IP=$(head -n 1 infra/instance_ips.txt)
+          echo "[INFO] Master Node: $MASTER_IP"
+          for ip in $IPS; do
+            ssh -o StrictHostKeyChecking=no -i infra/k8s-key.pem ubuntu@$ip "sudo apt-get update && sudo apt-get install -y docker.io kubeadm kubelet kubectl"
+          done
+          ssh -o StrictHostKeyChecking=no -i infra/k8s-key.pem ubuntu@$MASTER_IP "sudo kubeadm init --pod-network-cidr=10.244.0.0/16"
+          ssh -o StrictHostKeyChecking=no -i infra/k8s-key.pem ubuntu@$MASTER_IP "mkdir -p \$HOME/.kube && sudo cp -i /etc/kubernetes/admin.conf \$HOME/.kube/config && sudo chown \$(id -u):\$(id -g) \$HOME/.kube/config"
+          JOIN_CMD=$(ssh -o StrictHostKeyChecking=no -i infra/k8s-key.pem ubuntu@$MASTER_IP "kubeadm token create --print-join-command")
+          for ip in $(tail -n +2 infra/instance_ips.txt); do
+            ssh -o StrictHostKeyChecking=no -i infra/k8s-key.pem ubuntu@$ip "sudo $JOIN_CMD"
+          done
+          ssh -o StrictHostKeyChecking=no -i infra/k8s-key.pem ubuntu@$MASTER_IP "kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml"
+
+      - name: Deploy Application Manifests
         run: |
           MASTER_IP=$(head -n 1 infra/instance_ips.txt)
-          echo "[INFO] Connecting to Master Node: $MASTER_IP"
-          chmod 400 infra/k8s-key.pem
-          scp -o StrictHostKeyChecking=no -i infra/k8s-key.pem ./k8s/*.yaml ubuntu@$MASTER_IP:/home/ubuntu/
-          ssh -o StrictHostKeyChecking=no -i infra/k8s-key.pem ubuntu@$MASTER_IP << 'EOF'
-            echo "[INFO] Applying Kubernetes manifests..."
-            kubectl apply -f /home/ubuntu/
-          EOF
+          scp -o StrictHostKeyChecking=no -i infra/k8s-key.pem -r k8s ubuntu@$MASTER_IP:/home/ubuntu/k8s
+          ssh -o StrictHostKeyChecking=no -i infra/k8s-key.pem ubuntu@$MASTER_IP "kubectl apply -f /home/ubuntu/k8s"
