@@ -1,4 +1,4 @@
-name: Infra
+name: Provision Infrastructure
 
 on:
   push:
@@ -6,16 +6,11 @@ on:
       - 'infra/**'
   workflow_dispatch:
 
-env:
-  AWS_REGION: ${{ secrets.AWS_REGION }}
-  REGISTRY: kmn1624/craftista
-
 jobs:
   terraform_provision:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Repo
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v2
@@ -33,68 +28,22 @@ jobs:
         run: |
           cd infra
           terraform init
-          terraform apply -auto-approve
+          terraform apply -auto-approve || { echo "[ERROR] Destroying infra..."; terraform destroy -auto-approve; exit 1; }
 
-      - name: Extract Terraform Outputs with Fallback
+      - name: Extract & Commit Infra State
         run: |
           cd infra
-          echo "[INFO] Attempting Terraform output extraction..."
-          set +e
-          OUTPUT=$(terraform output -json || echo "")
+          terraform output -json > outputs.json
+          jq -r '.instance_ips.value[]?' outputs.json > instance_ips.txt
+          jq -r '.private_key.value' outputs.json > k8s-key.pem
+          chmod 600 k8s-key.pem
 
-          # Validate if OUTPUT is empty or invalid JSON
-          if [ -z "$OUTPUT" ] || ! echo "$OUTPUT" | jq empty >/dev/null 2>&1; then
-            echo "[WARN] Terraform outputs are invalid or empty. Using AWS CLI fallback..."
-            
-            # Install AWS CLI
-            pip install --user awscli
-            export PATH=$PATH:~/.local/bin
-
-            # Get instance IPs from AWS CLI
-            IPS=$(aws ec2 describe-instances \
-              --region "$AWS_REGION" \
-              --filters "Name=tag:Name,Values=k8s-*" \
-              --query "Reservations[*].Instances[*].PublicIpAddress" \
-              --output text)
-
-            if [ -z "$IPS" ]; then
-              echo "[ERROR] No instance IPs found via AWS CLI. Destroying infra..."
-              terraform destroy -auto-approve
-              exit 1
-            fi
-
-            echo "$IPS" | tr '\t' '\n' > instance_ips.txt
-            echo "[INFO] Extracted IPs via AWS CLI:"
-            cat instance_ips.txt
-
-            # Validate private key file
-            if [ ! -f k8s-key.pem ]; then
-              echo "[ERROR] Private key file not found. Destroying infra..."
-              terraform destroy -auto-approve
-              exit 1
-            fi
-          else
-            # Save valid output
-            echo "$OUTPUT" > outputs.json
-
-            # Extract instance IPs
-            INSTANCE_IPS=$(echo "$OUTPUT" | jq -r '.instance_ips.value[]?')
-            echo "$INSTANCE_IPS" > instance_ips.txt
-
-            # Extract private key
-            PRIVATE_KEY=$(echo "$OUTPUT" | jq -r '.private_key.value // empty')
-            echo "$PRIVATE_KEY" > k8s-key.pem
-            chmod 600 k8s-key.pem
-
-            echo "[INFO] Extracted IPs from Terraform output:"
-            cat instance_ips.txt
-          fi
-          set -e
-
-      - name: Upload Artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: k8s-artifacts
-          path: |
-            infra/k8s-key.pem
-            infra/instance_ips.txt
+          git config --global user.email "actions@github.com"
+          git config --global user.name "GitHub Actions"
+          git fetch origin
+          git checkout infra-state || git checkout --orphan infra-state
+          mkdir -p infra-state
+          cp instance_ips.txt k8s-key.pem infra-state/
+          git add infra-state/
+          git commit -m "Update infra state"
+          git push origin infra-state --force
