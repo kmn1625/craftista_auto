@@ -85,22 +85,17 @@ resource "aws_instance" "workers" {
   }
 }
 
-# ✅ Outputs (explicit map for jq)
-#output "instance_ips" {
-  #value = {
-    #master  = aws_instance.master.public_ip
-    #worker1 = aws_instance.workers[0].public_ip
-    #worker2 = aws_instance.workers[1].public_ip
-  #}
-#}
+# ✅ Outputs
 output "instance_ips" {
-  value = aws_instance.k8s_nodes[*].public_ip
+  description = "Public IPs of master and worker nodes"
+  value = concat(
+    [aws_instance.master.public_ip],
+    aws_instance.workers[*].public_ip
+  )
 }
 
 output "private_key" {
-  value     = tls_private_key.ssh_key.private_key_pem
+  description = "Private key to access EC2 instances"
+  value     = tls_private_key.k8s_key.private_key_pem
   sensitive = true
 }
-
-
-
