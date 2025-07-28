@@ -1,19 +1,22 @@
 name: Provision Infrastructure
 
 on:
+  workflow_dispatch:
   push:
     paths:
       - 'infra/**'
-      - 'main.tf'
-  workflow_dispatch:
+      - '.github/workflows/infra.yaml'
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  REGISTRY: kmn1624/craftista
 
 jobs:
   terraform_provision:
     runs-on: ubuntu-latest
-    env:
-      AWS_REGION: ${{ secrets.AWS_REGION }}
+
     steps:
-      - name: Checkout Repo
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
       - name: Setup Terraform
@@ -34,24 +37,45 @@ jobs:
           terraform init
           terraform apply -auto-approve
 
-      - name: Extract IPs and Key
+      - name: Extract Terraform Outputs with Validation
         run: |
           cd infra
-          terraform output -json > outputs.json
-          jq -r '.instance_ips.value[]' outputs.json > instance_ips.txt
-          jq -r '.private_key.value' outputs.json > k8s-key.pem
+          echo "[INFO] Attempting Terraform output extraction..."
+          OUTPUT=$(terraform output -json || echo "")
+
+          # Validate if OUTPUT is empty or invalid JSON
+          if [ -z "$OUTPUT" ] || ! echo "$OUTPUT" | jq empty >/dev/null 2>&1; then
+            echo "[ERROR] Terraform outputs are invalid or empty. Please check your main.tf outputs."
+            exit 1
+          fi
+
+          # Save valid output to file
+          echo "$OUTPUT" > outputs.json
+
+          # Extract instance IPs
+          INSTANCE_IPS=$(echo "$OUTPUT" | jq -r '.instance_ips.value[]?')
+          if [ -z "$INSTANCE_IPS" ]; then
+            echo "[ERROR] No instance IPs found in Terraform output."
+            exit 1
+          fi
+          echo "$INSTANCE_IPS" > instance_ips.txt
+
+          # Extract private key
+          PRIVATE_KEY=$(echo "$OUTPUT" | jq -r '.private_key.value // empty')
+          if [ -z "$PRIVATE_KEY" ]; then
+            echo "[ERROR] Private key not found in Terraform output."
+            exit 1
+          fi
+          echo "$PRIVATE_KEY" > k8s-key.pem
           chmod 600 k8s-key.pem
+
           echo "[INFO] Extracted IPs:"
           cat instance_ips.txt
 
-      - name: Commit Artifacts to infra-state Branch
-        run: |
-          git config --global user.email "github-actions@github.com"
-          git config --global user.name "GitHub Actions"
-          git checkout --orphan infra-state
-          git reset
-          mkdir -p infra-state
-          cp infra/instance_ips.txt infra/k8s-key.pem infra-state/
-          git add infra-state/*
-          git commit -m "Update infra artifacts"
-          git push origin HEAD:infra-state --force
+      - name: Upload Infra Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: k8s-artifacts
+          path: |
+            infra/instance_ips.txt
+            infra/k8s-key.pem
