@@ -1,7 +1,9 @@
 name: Build and Push Docker Images
 
 on:
-  workflow_dispatch:
+  workflow_run:
+    workflows: ["Infra"]
+    types: [completed]
   push:
     paths:
       - 'Dockerfile'
@@ -9,6 +11,7 @@ on:
       - 'catalogue/**'
       - 'voting/**'
       - 'recommendation/**'
+  workflow_dispatch:
 
 env:
   REGISTRY: kmn1624/craftista
@@ -20,17 +23,14 @@ jobs:
       - name: Checkout Repo
         uses: actions/checkout@v4
 
-      # ✅ Download the correct artifact (from Infra pipeline)
       - name: Download Infra Artifacts
         uses: actions/download-artifact@v4
         with:
-          name: k8s-artifacts   # ✅ Matches the name in infra workflow
-          path: infra/          # ✅ Download into infra directory
+          name: k8s-artifacts
+          path: infra/
 
       - name: Verify Artifacts
-        run: |
-          echo "[INFO] Downloaded infra artifacts:"
-          ls -l infra/
+        run: ls -l infra/
 
       - name: Docker Login
         run: echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
