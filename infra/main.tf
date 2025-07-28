@@ -86,13 +86,13 @@ resource "aws_instance" "workers" {
 }
 
 # ✅ Outputs (explicit map for jq)
-output "instance_ips" {
-  value = {
-    master  = aws_instance.master.public_ip
-    worker1 = aws_instance.workers[0].public_ip
-    worker2 = aws_instance.workers[1].public_ip
-  }
-}
+#output "instance_ips" {
+  #value = {
+    #master  = aws_instance.master.public_ip
+    #worker1 = aws_instance.workers[0].public_ip
+    #worker2 = aws_instance.workers[1].public_ip
+  #}
+#}
 output "instance_ips" {
   value = aws_instance.k8s_nodes[*].public_ip
 }
