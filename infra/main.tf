@@ -93,8 +93,14 @@ output "instance_ips" {
     worker2 = aws_instance.workers[1].public_ip
   }
 }
+output "instance_ips" {
+  value = aws_instance.k8s_nodes[*].public_ip
+}
 
 output "private_key" {
-  value     = tls_private_key.k8s_key.private_key_pem
+  value     = tls_private_key.ssh_key.private_key_pem
   sensitive = true
 }
+
+
+
