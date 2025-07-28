@@ -1,18 +1,19 @@
-name: CI-CD Pipeline
+name: Provision Infrastructure
 
 on:
+  push:
+    paths:
+      - 'infra/**'
+      - 'main.tf'
   workflow_dispatch:
 
-env:
-  AWS_REGION: ${{ secrets.AWS_REGION }}
-  REGISTRY: kmn1624/craftista
-
 jobs:
-  # Step 1: Provision Infrastructure
   terraform_provision:
     runs-on: ubuntu-latest
+    env:
+      AWS_REGION: ${{ secrets.AWS_REGION }}
     steps:
-      - name: Checkout repo
+      - name: Checkout Repo
         uses: actions/checkout@v4
 
       - name: Setup Terraform
@@ -29,99 +30,28 @@ jobs:
 
       - name: Terraform Init & Apply
         run: |
-          cd infra/
+          cd infra
           terraform init
           terraform apply -auto-approve
 
-      - name: Extract Terraform Outputs
+      - name: Extract IPs and Key
         run: |
-          cd infra/
+          cd infra
           terraform output -json > outputs.json
           jq -r '.instance_ips.value[]' outputs.json > instance_ips.txt
           jq -r '.private_key.value' outputs.json > k8s-key.pem
           chmod 600 k8s-key.pem
+          echo "[INFO] Extracted IPs:"
+          cat instance_ips.txt
 
-      - name: Upload Artifacts for Next Jobs
-        uses: actions/upload-artifact@v4
-        with:
-          name: k8s-artifacts
-          path: |
-            infra/k8s-key.pem
-            infra/instance_ips.txt
-
-  # Step 2: Build and Push Docker Images
-  docker_build_push:
-    runs-on: ubuntu-latest
-    needs: terraform_provision
-    steps:
-      - name: Checkout Repo
-        uses: actions/checkout@v4
-
-      - name: Download Infra Artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: k8s-artifacts
-          path: infra/
-
-      - name: Verify Artifacts
-        run: ls -l infra/
-
-      - name: Docker Login
-        run: echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
-
-      - name: Build & Push Images
+      - name: Commit Artifacts to infra-state Branch
         run: |
-          docker build -t $REGISTRY:frontend-latest ./frontend
-          docker push $REGISTRY:frontend-latest
-          docker build -t $REGISTRY:catalogue-latest ./catalogue
-          docker push $REGISTRY:catalogue-latest
-          docker build -t $REGISTRY:voting-latest ./voting
-          docker push $REGISTRY:voting-latest
-          docker build -t $REGISTRY:recommendation-latest ./recommendation
-          docker push $REGISTRY:recommendation-latest
-
-  # Step 3: Deploy to Kubernetes
-  deploy_k8s:
-    runs-on: ubuntu-latest
-    needs: docker_build_push
-    steps:
-      - name: Checkout Repo
-        uses: actions/checkout@v4
-
-      - name: Download Infra Artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: k8s-artifacts
-          path: infra/
-
-      - name: Verify Artifacts
-        run: ls -l infra/
-
-      - name: Install SSH & kubectl
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y sshpass curl
-          curl -LO "https://dl.k8s.io/release/$(curl -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-          chmod +x kubectl
-          sudo mv kubectl /usr/local/bin/
-      
-      - name: Setup Kubernetes (conditional, just as an example)
-        run: |
-          MASTER_IP=$(head -n 1 infra/instance_ips.txt)
-          chmod 400 infra/k8s-key.pem
-          ssh -o StrictHostKeyChecking=no -i infra/k8s-key.pem ubuntu@$MASTER_IP << 'EOF'
-            # Commands to install kubeadm, initialize master, join workers, etc.
-            # This should match your cluster setup requirements!
-            echo "Kubernetes setup would go here"
-          EOF
-
-      - name: Deploy Kubernetes Manifests
-        run: |
-          MASTER_IP=$(head -n 1 infra/instance_ips.txt)
-          echo "[INFO] Connecting to Master Node: $MASTER_IP"
-          chmod 400 infra/k8s-key.pem
-          scp -o StrictHostKeyChecking=no -i infra/k8s-key.pem ./k8s/*.yaml ubuntu@$MASTER_IP:/home/ubuntu/
-          ssh -o StrictHostKeyChecking=no -i infra/k8s-key.pem ubuntu@$MASTER_IP << 'EOF'
-            echo "[INFO] Applying Kubernetes manifests..."
-            kubectl apply -f /home/ubuntu/
-          EOF
+          git config --global user.email "github-actions@github.com"
+          git config --global user.name "GitHub Actions"
+          git checkout --orphan infra-state
+          git reset
+          mkdir -p infra-state
+          cp infra/instance_ips.txt infra/k8s-key.pem infra-state/
+          git add infra-state/*
+          git commit -m "Update infra artifacts"
+          git push origin HEAD:infra-state --force
