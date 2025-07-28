@@ -3,7 +3,7 @@ name: Deploy to Kubernetes
 on:
   workflow_dispatch:
   workflow_run:
-    workflows: ["Build and Push Docker Images"]
+    workflows: ["Infra"]  # ✅ Run after Infra pipeline
     types:
       - completed
 
@@ -14,7 +14,7 @@ jobs:
       - name: Checkout Repo
         uses: actions/checkout@v4
 
-      # ✅ Download infra artifacts (IPs and key)
+      # ✅ Download Infra Artifacts from previous workflow run
       - name: Download Infra Artifacts
         uses: actions/download-artifact@v4
         with:
@@ -27,7 +27,7 @@ jobs:
           ls -l infra/
           cat infra/instance_ips.txt
 
-      - name: Install SSH Client & K8s Tools
+      - name: Install SSH Client & kubectl
         run: |
           sudo apt-get update
           sudo apt-get install -y sshpass curl
@@ -41,10 +41,10 @@ jobs:
           echo "[INFO] Connecting to Master Node: $MASTER_IP"
           chmod 400 infra/k8s-key.pem
 
-          # Copy manifests to master node
+          # ✅ Copy manifests to master node
           scp -o StrictHostKeyChecking=no -i infra/k8s-key.pem ./k8s/*.yaml ubuntu@$MASTER_IP:/home/ubuntu/
 
-          # Apply manifests remotely
+          # ✅ Apply manifests remotely
           ssh -o StrictHostKeyChecking=no -i infra/k8s-key.pem ubuntu@$MASTER_IP << 'EOF'
             echo "[INFO] Applying Kubernetes manifests..."
             kubectl apply -f /home/ubuntu/
