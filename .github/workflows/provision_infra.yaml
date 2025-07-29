@@ -1,95 +1,173 @@
-name: Terraform Provision Infrastructure
+name: Full Infrastructure → Docker → Kubernetes Deployment
 
 on:
-  workflow_dispatch:
   push:
     paths:
       - 'infra/**'
+      - 'Dockerfile'
+      - 'frontend/**'
+      - 'catalogue/**'
+      - 'voting/**'
+      - 'recommendation/**'
+      - 'k8s/**'
+  workflow_dispatch:
 
 permissions:
-  contents: write   # ✅ Allow GitHub Actions to push changes
+  contents: write  # Needed for pushing to infra-state branch
 
 env:
+  REGISTRY: kmn1624/craftista
   AWS_REGION: ${{ secrets.AWS_REGION }}
 
 jobs:
-  terraform_provision:
-    runs-on: ubuntu-latest
 
+  # ===================== INFRA JOB =====================
+  infra:
+    name: Provision AWS Infrastructure
+    runs-on: ubuntu-latest
+    # ✅ Run only if infra directory changed
+    if: contains(join(github.event.commits.*.modified, ' '), 'infra/') || contains(join(github.event.commits.*.added, ' '), 'infra/')
     steps:
-      - name: Checkout Repository
+      - name: ✅ Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Terraform
+      - name: ✅ Setup Terraform
         uses: hashicorp/setup-terraform@v2
         with:
           terraform_version: 1.6.6
 
-      - name: Configure AWS Credentials
+      - name: ✅ Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v2
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: Terraform Init & Apply
+      - name: ✅ Terraform Init & Apply
+        id: tf_apply
         run: |
           cd infra
+          set -e
           terraform init
           terraform apply -auto-approve
 
-      - name: Extract Outputs & Push to Branch
+      - name: ✅ Extract Terraform Outputs or AWS Fallback
+        id: extract
         run: |
           cd infra
-          echo "[INFO] Extracting Terraform outputs..."
+          echo "[INFO] Extracting outputs..."
           OUTPUT=$(terraform output -json || echo "")
-
           if [ -z "$OUTPUT" ] || ! echo "$OUTPUT" | jq empty >/dev/null 2>&1; then
-            echo "[WARN] Terraform outputs invalid or empty. Falling back to AWS CLI."
+            echo "[WARN] Terraform output invalid, using AWS CLI fallback."
             pip install awscli --quiet
-
             INSTANCE_IPS=$(aws ec2 describe-instances \
               --filters "Name=tag:Name,Values=k8s-*" \
               --query "Reservations[*].Instances[*].PublicIpAddress" \
               --output text)
-
             if [ -z "$INSTANCE_IPS" ]; then
-              echo "[ERROR] No instance IPs found. Destroying infra..."
+              echo "[ERROR] No IPs found. Destroying infra."
               terraform destroy -auto-approve
               exit 1
             fi
-
             echo "$INSTANCE_IPS" | tr '\t' '\n' > instance_ips.txt
-
-            if [ ! -f k8s-key.pem ]; then
-              echo "[ERROR] Private key not found. Destroying infra..."
-              terraform destroy -auto-approve
-              exit 1
-            fi
-
           else
-            echo "$OUTPUT" > outputs.json
             echo "$OUTPUT" | jq -r '.instance_ips.value[]?' > instance_ips.txt
             echo "$OUTPUT" | jq -r '.private_key.value' > k8s-key.pem
             chmod 600 k8s-key.pem
           fi
-
-          echo "[INFO] Final extracted IPs:"
+          echo "[INFO] Final IPs:"
           cat instance_ips.txt
 
-          # ✅ Prepare infra-state branch
+      - name: ✅ Push State Files to Branch
+        run: |
           git config --global user.email "actions@github.com"
           git config --global user.name "GitHub Actions"
           git fetch origin
-
           if git ls-remote --exit-code --heads origin infra-state; then
             git switch infra-state
           else
             git switch --orphan infra-state
           fi
-
           mkdir -p infra-state
-          cp instance_ips.txt k8s-key.pem infra-state/
+          cp infra/instance_ips.txt infra/k8s-key.pem infra-state/
           git add infra-state/
           git commit -m "Update infra state"
           git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git infra-state --force
+
+    # ✅ Destroy infra if this job fails
+    if: failure()
+    steps:
+      - name: Destroy Infrastructure on Failure
+        run: |
+          cd infra
+          terraform destroy -auto-approve
+
+  # ===================== DOCKER JOB =====================
+  docker:
+    name: Build & Push Docker Images
+    runs-on: ubuntu-latest
+    needs: infra
+    # ✅ Run only if Docker-related files changed
+    if: >
+      contains(join(github.event.commits.*.modified, ' '), 'frontend/') ||
+      contains(join(github.event.commits.*.modified, ' '), 'catalogue/') ||
+      contains(join(github.event.commits.*.modified, ' '), 'voting/') ||
+      contains(join(github.event.commits.*.modified, ' '), 'recommendation/') ||
+      contains(join(github.event.commits.*.modified, ' '), 'Dockerfile')
+    steps:
+      - name: ✅ Checkout repository
+        uses: actions/checkout@v4
+
+      - name: ✅ Fetch Infra State Files
+        run: |
+          git fetch origin infra-state:infra-state
+          git switch infra-state
+          echo "[INFO] Infra files present:"
+          ls -l infra-state
+
+      - name: ✅ Docker Login
+        run: echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
+
+      - name: ✅ Build & Push Docker Images
+        run: |
+          docker build -t $REGISTRY:frontend-latest ./frontend
+          docker push $REGISTRY:frontend-latest
+          docker build -t $REGISTRY:catalogue-latest ./catalogue
+          docker push $REGISTRY:catalogue-latest
+          docker build -t $REGISTRY:voting-latest ./voting
+          docker push $REGISTRY:voting-latest
+          docker build -t $REGISTRY:recommendation-latest ./recommendation
+          docker push $REGISTRY:recommendation-latest
+
+  # ===================== K8S DEPLOY JOB =====================
+  deploy:
+    name: Deploy App to Kubernetes
+    runs-on: ubuntu-latest
+    needs: docker
+    # ✅ Run only if Kubernetes files changed
+    if: contains(join(github.event.commits.*.modified, ' '), 'k8s/')
+    steps:
+      - name: ✅ Checkout repository
+        uses: actions/checkout@v4
+
+      - name: ✅ Fetch Infra State Files
+        run: |
+          git fetch origin infra-state:infra-state
+          git switch infra-state
+          echo "[INFO] Infra state files:"
+          ls -l infra-state
+
+      - name: ✅ Install kubectl
+        run: |
+          curl -LO "https://dl.k8s.io/release/$(curl -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x kubectl && sudo mv kubectl /usr/local/bin/
+
+      - name: ✅ Setup SSH and Configure K8s
+        run: |
+          mkdir -p ~/.ssh
+          cp infra-state/k8s-key.pem ~/.ssh/k8s-key.pem
+          chmod 600 ~/.ssh/k8s-key.pem
+          for ip in $(cat infra-state/instance_ips.txt); do
+            echo "[INFO] Installing K8s manifests on $ip..."
+            ssh -o StrictHostKeyChecking=no -i ~/.ssh/k8s-key.pem ubuntu@$ip "kubectl apply -f /path/to/k8s/manifests"
+          done
