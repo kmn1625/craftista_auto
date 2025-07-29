@@ -1,4 +1,4 @@
-name: Full Infra → Docker → ArgoCD Deployment
+name: Full Infra → Docker → Deploy with ArgoCD
 
 on:
   workflow_dispatch:
@@ -67,24 +67,20 @@ jobs:
           fi
           chmod 600 k8s-key.pem
 
-      - name: ✅ Install kubectl & Configure Access
+      - name: ✅ Install MicroK8s and ArgoCD
         run: |
-          sudo apt-get update && sudo apt-get install -y kubectl
-          ssh -o StrictHostKeyChecking=no -i infra/k8s-key.pem ubuntu@$(head -n 1 infra/instance_ips.txt) " \
+          IP=$(head -n 1 infra/instance_ips.txt)
+          ssh -o StrictHostKeyChecking=no -i infra/k8s-key.pem ubuntu@$IP " \
             sudo snap install microk8s --classic && \
-            sudo usermod -aG microk8s ubuntu && \
-            microk8s status --wait-ready && \
+            sudo microk8s status --wait-ready && \
             sudo microk8s enable dns && \
-            mkdir -p ~/.kube && \
-            microk8s config > ~/.kube/config"
-
-      - name: ✅ Install ArgoCD
-        run: |
-          ssh -o StrictHostKeyChecking=no -i infra/k8s-key.pem ubuntu@$(head -n 1 infra/instance_ips.txt) " \
-            kubectl create namespace argocd || true && \
-            kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml && \
-            kubectl wait --for=condition=available --timeout=600s deployment/argocd-server -n argocd && \
-            kubectl patch svc argocd-server -n argocd -p '{\"spec\": {\"type\": \"LoadBalancer\"}}'"
+            sudo microk8s kubectl create namespace argocd || true && \
+            sudo microk8s kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml && \
+            sudo microk8s kubectl wait --for=condition=available --timeout=600s deployment/argocd-server -n argocd && \
+            sudo microk8s kubectl patch svc argocd-server -n argocd -p '{\"spec\": {\"type\": \"LoadBalancer\"}}' && \
+            sudo mkdir -p /home/ubuntu/.kube && \
+            sudo microk8s config > /home/ubuntu/.kube/config && \
+            sudo chown -R ubuntu:ubuntu /home/ubuntu/.kube"
 
       - name: ✅ Save Infra State to Branch
         run: |
@@ -143,4 +139,4 @@ jobs:
       - name: ✅ Trigger ArgoCD Sync
         run: |
           echo "[INFO] Triggering ArgoCD sync for application..."
-          # Example: You will set ARGOCD_SERVER and credentials later
+          # TODO: Implement ArgoCD CLI or API sync after initial setup
