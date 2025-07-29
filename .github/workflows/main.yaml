@@ -12,6 +12,8 @@ on:
       - 'recommendation/**'
       - 'k8s/**'
   workflow_dispatch:
+permissions:
+  contents: write
 
 env:
   REGISTRY: kmn1624/craftista
