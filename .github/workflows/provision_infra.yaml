@@ -1,16 +1,21 @@
-name: Provision Infrastructure
+name: Terraform Provision Infrastructure
 
 on:
+  workflow_dispatch:
   push:
     paths:
       - 'infra/**'
-  workflow_dispatch:
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION }}
 
 jobs:
   terraform_provision:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Repository
+        uses: actions/checkout@v4
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v2
@@ -28,16 +33,53 @@ jobs:
         run: |
           cd infra
           terraform init
-          terraform apply -auto-approve || { echo "[ERROR] Destroying infra..."; terraform destroy -auto-approve; exit 1; }
+          terraform apply -auto-approve
 
-      - name: Extract & Commit Infra State
+      - name: Extract Outputs and Push Infra State
         run: |
           cd infra
-          terraform output -json > outputs.json
-          jq -r '.instance_ips.value[]?' outputs.json > instance_ips.txt
-          jq -r '.private_key.value' outputs.json > k8s-key.pem
-          chmod 600 k8s-key.pem
+          echo "[INFO] Extracting Terraform outputs..."
+          OUTPUT=$(terraform output -json || echo "")
 
+          # ✅ Validate JSON before jq
+          if [ -z "$OUTPUT" ] || ! echo "$OUTPUT" | jq empty >/dev/null 2>&1; then
+            echo "[WARN] Terraform output invalid or empty. Falling back to AWS CLI..."
+
+            # Install AWS CLI
+            pip install awscli --quiet
+
+            # Get instance IPs
+            INSTANCE_IPS=$(aws ec2 describe-instances \
+              --filters "Name=tag:Name,Values=k8s-*" \
+              --query "Reservations[*].Instances[*].PublicIpAddress" \
+              --output text)
+
+            if [ -z "$INSTANCE_IPS" ]; then
+              echo "[ERROR] No instance IPs found!"
+              terraform destroy -auto-approve
+              exit 1
+            fi
+
+            echo "$INSTANCE_IPS" | tr '\t' '\n' > instance_ips.txt
+
+            # Ensure key exists
+            if [ ! -f k8s-key.pem ]; then
+              echo "[ERROR] Private key not found! Destroying infra..."
+              terraform destroy -auto-approve
+              exit 1
+            fi
+
+          else
+            echo "$OUTPUT" > outputs.json
+            echo "$OUTPUT" | jq -r '.instance_ips.value[]?' > instance_ips.txt
+            echo "$OUTPUT" | jq -r '.private_key.value' > k8s-key.pem
+            chmod 600 k8s-key.pem
+          fi
+
+          echo "[INFO] IPs found:"
+          cat instance_ips.txt
+
+          # ✅ Commit infra-state branch
           git config --global user.email "actions@github.com"
           git config --global user.name "GitHub Actions"
           git fetch origin
