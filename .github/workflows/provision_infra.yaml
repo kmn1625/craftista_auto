@@ -95,12 +95,12 @@ jobs:
           git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git infra-state --force
 
     # ✅ Destroy infra if this job fails
-    if: failure()
-    steps:
-      - name: Destroy Infrastructure on Failure
-        run: |
-          cd infra
-          terraform destroy -auto-approve
+    #if: failure()
+    #steps:
+      #- name: Destroy Infrastructure on Failure
+       # run: |
+         # cd infra
+          #terraform destroy -auto-approve
 
   # ===================== DOCKER JOB =====================
   docker:
