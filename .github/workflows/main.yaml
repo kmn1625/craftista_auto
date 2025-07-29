@@ -1,14 +1,11 @@
-name: Full Infra + Docker + ArgoCD GitOps
-
-permissions:
-  contents: write  # ✅ Needed to push infra state branch
+name: Infra → Docker → K8s Deployment Pipeline
 
 on:
   push:
-    branches:
-      - main
+    branches: [ main ]
     paths:
       - 'infra/**'
+      - 'Dockerfile'
       - 'frontend/**'
       - 'catalogue/**'
       - 'voting/**'
@@ -16,17 +13,23 @@ on:
       - 'k8s/**'
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 env:
   REGISTRY: kmn1624/craftista
   AWS_REGION: ${{ secrets.AWS_REGION }}
 
 jobs:
+  # -------------------------------
+  # ✅ 1. Provision Infrastructure
+  # -------------------------------
   provision_infra:
-    name: Provision Infrastructure
     runs-on: ubuntu-latest
-    if: contains(github.event.head_commit.message, 'infra') || github.event_name == 'workflow_dispatch'
+    if: contains(github.event.head_commit.message, 'infra') || contains(join(github.event.pull_request.changed_files.*), 'infra/')
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Repo
+        uses: actions/checkout@v4
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v2
@@ -46,50 +49,78 @@ jobs:
           terraform init
           terraform apply -auto-approve
 
-      - name: Extract Outputs & Push to Branch
+      - name: Extract Outputs or Fallback to AWS CLI
         run: |
           cd infra
           echo "[INFO] Extracting Terraform outputs..."
           OUTPUT=$(terraform output -json || echo "")
 
           if [ -z "$OUTPUT" ] || ! echo "$OUTPUT" | jq empty >/dev/null 2>&1; then
-            echo "[WARN] Terraform output invalid. Using AWS CLI fallback..."
+            echo "[WARN] Terraform outputs invalid. Using AWS CLI fallback..."
             pip install awscli --quiet
+
             INSTANCE_IPS=$(aws ec2 describe-instances \
               --filters "Name=tag:Name,Values=k8s-*" \
               --query "Reservations[*].Instances[*].PublicIpAddress" \
               --output text)
+
+            if [ -z "$INSTANCE_IPS" ]; then
+              echo "[ERROR] No instance IPs found. Destroying infra..."
+              terraform destroy -auto-approve
+              exit 1
+            fi
+
             echo "$INSTANCE_IPS" | tr '\t' '\n' > instance_ips.txt
+
+            if [ ! -f k8s-key.pem ]; then
+              echo "[ERROR] Private key missing. Destroying infra..."
+              terraform destroy -auto-approve
+              exit 1
+            fi
           else
+            echo "$OUTPUT" > outputs.json
             echo "$OUTPUT" | jq -r '.instance_ips.value[]?' > instance_ips.txt
             echo "$OUTPUT" | jq -r '.private_key.value' > k8s-key.pem
+            chmod 600 k8s-key.pem
           fi
-          chmod 600 k8s-key.pem
 
+          echo "[INFO] IPs extracted:"
+          cat instance_ips.txt
+
+      - name: Push Infra State to Branch
+        run: |
           git config --global user.email "actions@github.com"
           git config --global user.name "GitHub Actions"
           git fetch origin
           git checkout infra-state || git checkout --orphan infra-state
           mkdir -p infra-state
-          cp instance_ips.txt k8s-key.pem infra-state/
+          cp infra/instance_ips.txt infra/k8s-key.pem infra-state/
           git add infra-state/
           git commit -m "Update infra state"
           git push origin infra-state --force
 
+  # -------------------------------
+  # ✅ 2. Build & Push Docker Images
+  # -------------------------------
   docker_build_push:
-    name: Build & Push Docker Images
     runs-on: ubuntu-latest
-    needs: provision_infra
-    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, 'docker')
+    needs: [provision_infra]
+    if: contains(join(github.event.pull_request.changed_files.*), 'Dockerfile') || contains(join(github.event.pull_request.changed_files.*), 'frontend/') || contains(join(github.event.pull_request.changed_files.*), 'catalogue/') || contains(join(github.event.pull_request.changed_files.*), 'voting/') || contains(join(github.event.pull_request.changed_files.*), 'recommendation/')
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Repo
+        uses: actions/checkout@v4
 
-      - name: Restore infra-state files
+      - name: Fetch Infra State Branch
         run: |
-          git fetch origin infra-state
-          git restore --source=origin/infra-state infra-state/
-          echo "[INFO] Infra state files restored:"
-          ls -l infra-state
+          git fetch origin infra-state || echo "[WARN] No infra-state branch found."
+          if git ls-tree -r origin/infra-state --name-only | grep -q 'infra-state/'; then
+            git restore --source=origin/infra-state infra-state/
+            echo "[INFO] Infra state files restored:"
+            ls -l infra-state
+          else
+            echo "[ERROR] No infra-state directory found. Cannot proceed."
+            exit 1
+          fi
 
       - name: Docker Login
         run: echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
@@ -105,52 +136,47 @@ jobs:
           docker build -t $REGISTRY:recommendation-latest ./recommendation
           docker push $REGISTRY:recommendation-latest
 
-  deploy_with_argocd:
-    name: Deploy with ArgoCD
+  # -------------------------------
+  # ✅ 3. Deploy to K8s (MicroK8s)
+  # -------------------------------
+  deploy_with_k8s:
     runs-on: ubuntu-latest
-    needs: docker_build_push
-    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, 'k8s')
+    needs: [docker_build_push]
+    if: contains(join(github.event.pull_request.changed_files.*), 'k8s/')
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Repo
+        uses: actions/checkout@v4
 
-      - name: Restore infra-state files
+      - name: Fetch Infra State Branch
         run: |
-          git fetch origin infra-state
-          git restore --source=origin/infra-state infra-state/
-          echo "[INFO] Using infra artifacts:"
-          ls -l infra-state
+          git fetch origin infra-state || echo "[WARN] No infra-state branch found."
+          if git ls-tree -r origin/infra-state --name-only | grep -q 'infra-state/'; then
+            git restore --source=origin/infra-state infra-state/
+            echo "[INFO] Infra state files restored:"
+            ls -l infra-state
+          else
+            echo "[ERROR] No infra-state directory found. Cannot proceed."
+            exit 1
+          fi
 
-      - name: SSH into EC2 & Install MicroK8s + ArgoCD
+      - name: SSH into Master Node & Setup K8s
         run: |
-          IP=$(cat infra-state/instance_ips.txt | head -n 1)
+          MASTER_IP=$(head -n 1 infra-state/instance_ips.txt)
           chmod 600 infra-state/k8s-key.pem
-          ssh -o StrictHostKeyChecking=no -i infra-state/k8s-key.pem ubuntu@$IP << 'EOF'
-            sudo snap install microk8s --classic --channel=1.32/stable
-            sudo usermod -aG microk8s ubuntu
+
+          ssh -o StrictHostKeyChecking=no -i infra-state/k8s-key.pem ubuntu@$MASTER_IP << 'EOF'
+            sudo snap install microk8s --classic
+            sudo usermod -a -G microk8s ubuntu
             sudo chown -R ubuntu ~/.kube
-            sudo microk8s status --wait-ready
-            sudo microk8s enable dns storage
-            sudo microk8s kubectl create namespace argocd || true
-            sudo microk8s kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
-            sudo microk8s kubectl wait --for=condition=available deployment/argocd-server -n argocd --timeout=300s
-            sudo microk8s kubectl patch svc argocd-server -n argocd -p '{"spec": {"type": "LoadBalancer"}}'
-            mkdir -p ~/.kube
-            sudo microk8s config | sudo tee /home/ubuntu/.kube/config > /dev/null
-            sudo chown -R ubuntu:ubuntu /home/ubuntu/.kube
+            newgrp microk8s
+            microk8s status --wait-ready
+            microk8s enable dns storage
+            echo "[INFO] MicroK8s installed and ready"
           EOF
 
-      - name: Install ArgoCD CLI and Sync App
+      - name: Deploy App to K8s
         run: |
-          curl -sSL -o argocd https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
-          chmod +x argocd
-          sudo mv argocd /usr/local/bin/
-          IP=$(cat infra-state/instance_ips.txt | head -n 1)
-          PASSWORD=$(ssh -o StrictHostKeyChecking=no -i infra-state/k8s-key.pem ubuntu@$IP "sudo microk8s kubectl get secret argocd-initial-admin-secret -n argocd -o jsonpath='{.data.password}' | base64 --decode")
-          argocd login $IP --username admin --password $PASSWORD --insecure
-          argocd app create craftista-app \
-            --repo https://github.com/${{ github.repository }}.git \
-            --path k8s \
-            --dest-server https://kubernetes.default.svc \
-            --dest-namespace default \
-            --sync-policy automated || echo "App already exists"
-          argocd app sync craftista-app
+          MASTER_IP=$(head -n 1 infra-state/instance_ips.txt)
+          ssh -o StrictHostKeyChecking=no -i infra-state/k8s-key.pem ubuntu@$MASTER_IP << 'EOF'
+            microk8s kubectl apply -f /home/ubuntu/k8s/
+          EOF
