@@ -1,60 +1,56 @@
-name: Full Infra → Docker → Deploy with ArgoCD
+name: Full Infra + Docker + ArgoCD GitOps
 
 on:
-  workflow_dispatch:
   push:
     branches:
       - main
     paths:
       - 'infra/**'
-      - 'Dockerfile'
       - 'frontend/**'
       - 'catalogue/**'
       - 'voting/**'
       - 'recommendation/**'
       - 'k8s/**'
-
-permissions:
-  contents: write
+  workflow_dispatch:
 
 env:
   REGISTRY: kmn1624/craftista
   AWS_REGION: ${{ secrets.AWS_REGION }}
 
 jobs:
-
-  # ===================== INFRA JOB =====================
-  infra:
-    name: Provision Infra & Install ArgoCD
+  provision_infra:
+    name: Provision Infrastructure
     runs-on: ubuntu-latest
+    if: contains(github.event.head_commit.message, 'infra') || github.event_name == 'workflow_dispatch'
     steps:
-      - name: ✅ Checkout Repo
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: ✅ Setup Terraform
+      - name: Setup Terraform
         uses: hashicorp/setup-terraform@v2
         with:
           terraform_version: 1.6.6
 
-      - name: ✅ Configure AWS
+      - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v2
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: ✅ Terraform Init & Apply
+      - name: Terraform Init & Apply
         run: |
           cd infra
           terraform init
           terraform apply -auto-approve
 
-      - name: ✅ Extract IPs or Fallback to AWS CLI
+      - name: Extract Outputs & Push to Branch
         run: |
           cd infra
+          echo "[INFO] Extracting Terraform outputs..."
           OUTPUT=$(terraform output -json || echo "")
+
           if [ -z "$OUTPUT" ] || ! echo "$OUTPUT" | jq empty >/dev/null 2>&1; then
-            echo "[WARN] Terraform outputs invalid. Using AWS CLI fallback."
+            echo "[WARN] Terraform output invalid. Using AWS CLI fallback..."
             pip install awscli --quiet
             INSTANCE_IPS=$(aws ec2 describe-instances \
               --filters "Name=tag:Name,Values=k8s-*" \
@@ -67,76 +63,91 @@ jobs:
           fi
           chmod 600 k8s-key.pem
 
-      - name: ✅ Install MicroK8s and ArgoCD
-        run: |
-          IP=$(head -n 1 infra/instance_ips.txt)
-          ssh -o StrictHostKeyChecking=no -i infra/k8s-key.pem ubuntu@$IP " \
-            sudo snap install microk8s --classic && \
-            sudo microk8s status --wait-ready && \
-            sudo microk8s enable dns && \
-            sudo microk8s kubectl create namespace argocd || true && \
-            sudo microk8s kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml && \
-            sudo microk8s kubectl wait --for=condition=available --timeout=600s deployment/argocd-server -n argocd && \
-            sudo microk8s kubectl patch svc argocd-server -n argocd -p '{\"spec\": {\"type\": \"LoadBalancer\"}}' && \
-            sudo mkdir -p /home/ubuntu/.kube && \
-            sudo microk8s config > /home/ubuntu/.kube/config && \
-            sudo chown -R ubuntu:ubuntu /home/ubuntu/.kube"
-
-      - name: ✅ Save Infra State to Branch
-        run: |
           git config --global user.email "actions@github.com"
           git config --global user.name "GitHub Actions"
           git fetch origin
-          git switch --orphan infra-state || git switch infra-state
+          git checkout infra-state || git checkout --orphan infra-state
           mkdir -p infra-state
-          cp infra/instance_ips.txt infra/k8s-key.pem infra-state/
+          cp instance_ips.txt k8s-key.pem infra-state/
           git add infra-state/
           git commit -m "Update infra state"
-          git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git infra-state --force
+          git push origin infra-state --force
 
-      - name: ✅ Destroy Infra on Failure
-        if: failure()
-        run: |
-          echo "[ERROR] Destroying infra due to failure..."
-          cd infra
-          terraform destroy -auto-approve
-
-  # ===================== DOCKER JOB =====================
-  docker:
+  docker_build_push:
     name: Build & Push Docker Images
     runs-on: ubuntu-latest
-    needs: [infra]
+    needs: provision_infra
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, 'docker')
     steps:
-      - name: ✅ Checkout Repo
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: ✅ Fetch infra-state Branch
+      - name: Fetch infra-state branch
         run: |
-          git fetch origin infra-state:infra-state
-          git switch infra-state
+          git fetch origin infra-state
+          git checkout infra-state -- infra-state/
+          echo "[INFO] Infra state files:"
           ls -l infra-state
 
-      - name: ✅ Docker Login
+      - name: Docker Login
         run: echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
 
-      - name: ✅ Build & Push Images
+      - name: Build & Push Images
         run: |
-          docker build -t $REGISTRY:frontend-${GITHUB_SHA} ./frontend
-          docker push $REGISTRY:frontend-${GITHUB_SHA}
-          docker build -t $REGISTRY:catalogue-${GITHUB_SHA} ./catalogue
-          docker push $REGISTRY:catalogue-${GITHUB_SHA}
-          docker build -t $REGISTRY:voting-${GITHUB_SHA} ./voting
-          docker push $REGISTRY:voting-${GITHUB_SHA}
-          docker build -t $REGISTRY:recommendation-${GITHUB_SHA} ./recommendation
-          docker push $REGISTRY:recommendation-${GITHUB_SHA}
+          docker build -t $REGISTRY:frontend-latest ./frontend
+          docker push $REGISTRY:frontend-latest
+          docker build -t $REGISTRY:catalogue-latest ./catalogue
+          docker push $REGISTRY:catalogue-latest
+          docker build -t $REGISTRY:voting-latest ./voting
+          docker push $REGISTRY:voting-latest
+          docker build -t $REGISTRY:recommendation-latest ./recommendation
+          docker push $REGISTRY:recommendation-latest
 
-  # ===================== ARGOCD DEPLOY JOB =====================
-  deploy:
-    name: Deploy via ArgoCD
+  deploy_with_argocd:
+    name: Deploy with ArgoCD
     runs-on: ubuntu-latest
-    needs: [docker]
+    needs: docker_build_push
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, 'k8s')
     steps:
-      - name: ✅ Trigger ArgoCD Sync
+      - uses: actions/checkout@v4
+
+      - name: Fetch infra-state branch
         run: |
-          echo "[INFO] Triggering ArgoCD sync for application..."
-          # TODO: Implement ArgoCD CLI or API sync after initial setup
+          git fetch origin infra-state
+          git checkout infra-state -- infra-state/
+          echo "[INFO] Using infra artifacts:"
+          ls -l infra-state
+
+      - name: SSH into EC2 & Install MicroK8s + ArgoCD
+        run: |
+          IP=$(cat infra-state/instance_ips.txt | head -n 1)
+          chmod 600 infra-state/k8s-key.pem
+          ssh -o StrictHostKeyChecking=no -i infra-state/k8s-key.pem ubuntu@$IP << 'EOF'
+            sudo snap install microk8s --classic --channel=1.32/stable
+            sudo usermod -aG microk8s ubuntu
+            sudo chown -R ubuntu ~/.kube
+            sudo microk8s status --wait-ready
+            sudo microk8s enable dns storage
+            sudo microk8s kubectl create namespace argocd || true
+            sudo microk8s kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+            sudo microk8s kubectl wait --for=condition=available deployment/argocd-server -n argocd --timeout=300s
+            sudo microk8s kubectl patch svc argocd-server -n argocd -p '{"spec": {"type": "LoadBalancer"}}'
+            mkdir -p ~/.kube
+            sudo microk8s config | sudo tee /home/ubuntu/.kube/config > /dev/null
+            sudo chown -R ubuntu:ubuntu /home/ubuntu/.kube
+          EOF
+
+      - name: Install ArgoCD CLI and Sync App
+        run: |
+          curl -sSL -o argocd https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
+          chmod +x argocd
+          sudo mv argocd /usr/local/bin/
+          IP=$(cat infra-state/instance_ips.txt | head -n 1)
+          PASSWORD=$(ssh -o StrictHostKeyChecking=no -i infra-state/k8s-key.pem ubuntu@$IP "sudo microk8s kubectl get secret argocd-initial-admin-secret -n argocd -o jsonpath='{.data.password}' | base64 --decode")
+          argocd login $IP --username admin --password $PASSWORD --insecure
+          argocd app create craftista-app \
+            --repo https://github.com/${{ github.repository }}.git \
+            --path k8s \
+            --dest-server https://kubernetes.default.svc \
+            --dest-namespace default \
+            --sync-policy automated || echo "App already exists"
+          argocd app sync craftista-app
