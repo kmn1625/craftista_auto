@@ -13,16 +13,22 @@ on:
       - 'voting/**'
       - 'recommendation/**'
 
+env:
+  REGISTRY: kmn1624/craftista
+
 jobs:
   docker_build_push:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Repo
+        uses: actions/checkout@v4
 
+      # ✅ Fetch Infra State from Branch (instead of artifact)
       - name: Fetch Infra State
         run: |
           git fetch origin infra-state
           git checkout infra-state -- infra-state/
+          echo "[INFO] Infra state files available:"
           ls -l infra-state
 
       - name: Docker Login
