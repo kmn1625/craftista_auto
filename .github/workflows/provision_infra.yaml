@@ -79,7 +79,12 @@ jobs:
           git commit -m "Update infra state"
           git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git infra-state --force
 
-    
+      - name: ✅ Destroy Infra on Failure
+        if: failure()
+        run: |
+          echo "[ERROR] Infra provisioning failed. Destroying resources..."
+          cd infra
+          terraform destroy -auto-approve
 
   # ===================== DOCKER JOB =====================
   docker:
