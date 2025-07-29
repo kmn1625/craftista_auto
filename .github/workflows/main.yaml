@@ -1,5 +1,8 @@
 name: Full Infra + Docker + ArgoCD GitOps
 
+permissions:
+  contents: write  # ✅ Needed to push infra state branch
+
 on:
   push:
     branches:
@@ -12,8 +15,6 @@ on:
       - 'recommendation/**'
       - 'k8s/**'
   workflow_dispatch:
-permissions:
-  contents: write
 
 env:
   REGISTRY: kmn1624/craftista
@@ -83,11 +84,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Fetch infra-state branch
+      - name: Restore infra-state files
         run: |
           git fetch origin infra-state
-          git checkout infra-state -- infra-state/
-          echo "[INFO] Infra state files:"
+          git restore --source=origin/infra-state infra-state/
+          echo "[INFO] Infra state files restored:"
           ls -l infra-state
 
       - name: Docker Login
@@ -112,10 +113,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Fetch infra-state branch
+      - name: Restore infra-state files
         run: |
           git fetch origin infra-state
-          git checkout infra-state -- infra-state/
+          git restore --source=origin/infra-state infra-state/
           echo "[INFO] Using infra artifacts:"
           ls -l infra-state
 
