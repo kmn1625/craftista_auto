@@ -1,7 +1,10 @@
-name: Full Infrastructure → Docker → ArgoCD Deployment
+name: Full Infra → Docker → ArgoCD Deployment
 
 on:
+  workflow_dispatch:
   push:
+    branches:
+      - main
     paths:
       - 'infra/**'
       - 'Dockerfile'
@@ -10,7 +13,6 @@ on:
       - 'voting/**'
       - 'recommendation/**'
       - 'k8s/**'
-  workflow_dispatch:
 
 permissions:
   contents: write
@@ -23,11 +25,10 @@ jobs:
 
   # ===================== INFRA JOB =====================
   infra:
-    name: Provision AWS Infrastructure
+    name: Provision Infra & Install ArgoCD
     runs-on: ubuntu-latest
-    if: contains(join(github.event.commits.*.modified, ' '), 'infra/')
     steps:
-      - name: ✅ Checkout repo
+      - name: ✅ Checkout Repo
         uses: actions/checkout@v4
 
       - name: ✅ Setup Terraform
@@ -42,18 +43,18 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: ✅ Terraform Apply
+      - name: ✅ Terraform Init & Apply
         run: |
           cd infra
           terraform init
           terraform apply -auto-approve
 
-      - name: ✅ Extract Outputs & Push to Branch
+      - name: ✅ Extract IPs or Fallback to AWS CLI
         run: |
           cd infra
           OUTPUT=$(terraform output -json || echo "")
           if [ -z "$OUTPUT" ] || ! echo "$OUTPUT" | jq empty >/dev/null 2>&1; then
-            echo "[WARN] Terraform outputs invalid, using AWS CLI fallback."
+            echo "[WARN] Terraform outputs invalid. Using AWS CLI fallback."
             pip install awscli --quiet
             INSTANCE_IPS=$(aws ec2 describe-instances \
               --filters "Name=tag:Name,Values=k8s-*" \
@@ -65,16 +66,34 @@ jobs:
             echo "$OUTPUT" | jq -r '.private_key.value' > k8s-key.pem
           fi
           chmod 600 k8s-key.pem
+
+      - name: ✅ Install kubectl & Configure Access
+        run: |
+          sudo apt-get update && sudo apt-get install -y kubectl
+          ssh -o StrictHostKeyChecking=no -i infra/k8s-key.pem ubuntu@$(head -n 1 infra/instance_ips.txt) " \
+            sudo snap install microk8s --classic && \
+            sudo usermod -aG microk8s ubuntu && \
+            microk8s status --wait-ready && \
+            sudo microk8s enable dns && \
+            mkdir -p ~/.kube && \
+            microk8s config > ~/.kube/config"
+
+      - name: ✅ Install ArgoCD
+        run: |
+          ssh -o StrictHostKeyChecking=no -i infra/k8s-key.pem ubuntu@$(head -n 1 infra/instance_ips.txt) " \
+            kubectl create namespace argocd || true && \
+            kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml && \
+            kubectl wait --for=condition=available --timeout=600s deployment/argocd-server -n argocd && \
+            kubectl patch svc argocd-server -n argocd -p '{\"spec\": {\"type\": \"LoadBalancer\"}}'"
+
+      - name: ✅ Save Infra State to Branch
+        run: |
           git config --global user.email "actions@github.com"
           git config --global user.name "GitHub Actions"
           git fetch origin
-          if git ls-remote --exit-code --heads origin infra-state; then
-            git switch infra-state
-          else
-            git switch --orphan infra-state
-          fi
+          git switch --orphan infra-state || git switch infra-state
           mkdir -p infra-state
-          cp instance_ips.txt k8s-key.pem infra-state/
+          cp infra/instance_ips.txt infra/k8s-key.pem infra-state/
           git add infra-state/
           git commit -m "Update infra state"
           git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git infra-state --force
@@ -82,7 +101,7 @@ jobs:
       - name: ✅ Destroy Infra on Failure
         if: failure()
         run: |
-          echo "[ERROR] Infra provisioning failed. Destroying resources..."
+          echo "[ERROR] Destroying infra due to failure..."
           cd infra
           terraform destroy -auto-approve
 
@@ -90,28 +109,21 @@ jobs:
   docker:
     name: Build & Push Docker Images
     runs-on: ubuntu-latest
-    needs: infra
-    if: >
-      contains(join(github.event.commits.*.modified, ' '), 'frontend/') ||
-      contains(join(github.event.commits.*.modified, ' '), 'catalogue/') ||
-      contains(join(github.event.commits.*.modified, ' '), 'voting/') ||
-      contains(join(github.event.commits.*.modified, ' '), 'recommendation/') ||
-      contains(join(github.event.commits.*.modified, ' '), 'Dockerfile')
+    needs: [infra]
     steps:
-      - name: ✅ Checkout repo
+      - name: ✅ Checkout Repo
         uses: actions/checkout@v4
 
-      - name: ✅ Fetch infra-state branch
+      - name: ✅ Fetch infra-state Branch
         run: |
           git fetch origin infra-state:infra-state
           git switch infra-state
-          echo "[INFO] Infra files present:"
           ls -l infra-state
 
       - name: ✅ Docker Login
         run: echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
 
-      - name: ✅ Build & Push
+      - name: ✅ Build & Push Images
         run: |
           docker build -t $REGISTRY:frontend-${GITHUB_SHA} ./frontend
           docker push $REGISTRY:frontend-${GITHUB_SHA}
@@ -122,31 +134,13 @@ jobs:
           docker build -t $REGISTRY:recommendation-${GITHUB_SHA} ./recommendation
           docker push $REGISTRY:recommendation-${GITHUB_SHA}
 
-      - name: ✅ Update K8s Manifests with New Image Tags
-        run: |
-          git config --global user.email "actions@github.com"
-          git config --global user.name "GitHub Actions"
-          git fetch origin
-          git switch main
-          sed -i "s|image: .*/frontend.*|image: $REGISTRY:frontend-${GITHUB_SHA}|" k8s/frontend-deployment.yaml
-          sed -i "s|image: .*/catalogue.*|image: $REGISTRY:catalogue-${GITHUB_SHA}|" k8s/catalogue-deployment.yaml
-          sed -i "s|image: .*/voting.*|image: $REGISTRY:voting-${GITHUB_SHA}|" k8s/voting-deployment.yaml
-          sed -i "s|image: .*/recommendation.*|image: $REGISTRY:recommendation-${GITHUB_SHA}|" k8s/recommendation-deployment.yaml
-          git add k8s/
-          git commit -m "Update image tags for deployment"
-          git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git main
-
-  # ===================== K8S DEPLOY VIA ARGOCD =====================
+  # ===================== ARGOCD DEPLOY JOB =====================
   deploy:
-    name: ArgoCD Sync Trigger
+    name: Deploy via ArgoCD
     runs-on: ubuntu-latest
-    needs: docker
-    if: contains(join(github.event.commits.*.modified, ' '), 'k8s/')
+    needs: [docker]
     steps:
       - name: ✅ Trigger ArgoCD Sync
         run: |
-          curl -k -X POST \
-            -H "Content-Type: application/json" \
-            -d '{"revision":"main"}' \
-            -u "admin:${{ secrets.ARGOCD_ADMIN_PASSWORD }}" \
-            ${{ secrets.ARGOCD_SERVER }}/api/v1/applications/craftista/sync
+          echo "[INFO] Triggering ArgoCD sync for application..."
+          # Example: You will set ARGOCD_SERVER and credentials later
