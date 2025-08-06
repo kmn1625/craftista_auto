@@ -10,7 +10,7 @@ on:
       - 'catalogue/**'
       - 'voting/**'
       - 'recommendation/**'
-      - 'k8s/**'
+      - 'k8s-manifests/**'
   workflow_dispatch:
 
 permissions:
@@ -21,9 +21,9 @@ env:
   AWS_REGION: ${{ secrets.AWS_REGION }}
 
 jobs:
-  # ===========================
-  # 1. Provision Infrastructure
-  # ===========================
+  # ======================================
+  # 1. Provision Infrastructure (Terraform)
+  # ======================================
   provision_infra:
     name: Provision Infra
     runs-on: ubuntu-latest
@@ -90,9 +90,9 @@ jobs:
           git commit -m "Update infra state"
           git push origin infra-state --force
 
-  # ===========================
+  # ======================================
   # 2. Build & Push Docker Images
-  # ===========================
+  # ======================================
   build_docker:
     name: Build & Push Docker Images
     runs-on: ubuntu-latest
@@ -128,15 +128,15 @@ jobs:
           docker build -t $REGISTRY:recommendation-latest ./recommendation
           docker push $REGISTRY:recommendation-latest
 
-  # ===========================
-  # 3. Deploy to Kubernetes
-  # ===========================
+  # ======================================
+  # 3. Deploy to Kubernetes with Fixes
+  # ======================================
   deploy_k8s:
     name: Deploy to Kubernetes
     runs-on: ubuntu-latest
     needs: [build_docker]
     if: |
-      contains(join(github.event.commits.*.modified, ' '), 'k8s/') ||
+      contains(join(github.event.commits.*.modified, ' '), 'k8s-manifests/') ||
       github.event_name == 'workflow_dispatch'
     steps:
       - name: Checkout Repo
@@ -144,32 +144,38 @@ jobs:
 
       - name: Restore Infra State
         run: |
-           git fetch origin infra-state
-           git restore --source=origin/infra-state infra-state/
-           echo "[INFO] Files restored:"
-           ls -l infra-state
+          git fetch origin infra-state
+          git restore --source=origin/infra-state infra-state/
+          echo "[INFO] Files restored:"
+          ls -l infra-state
 
-      - name: Verify k8s directory exists
+      - name: Deploy Manifests with Readiness Check & Permission Fix
         run: |
-          if [ ! -d "./k8s" ]; then
-          echo "[ERROR] The ./k8s directory does not exist in the repository."
-          exit 1
-          fi
-          echo "[INFO] Found k8s manifests:"
-          ls -l ./k8s
+          IPS=$(cat infra-state/instance_ips.txt)
+          KEY="infra-state/k8s-key.pem"
+          chmod 600 $KEY
 
-      - name: Copy Manifests and Deploy with sudo
-        run: |
-           IPS=$(cat infra-state/instance_ips.txt)
-           KEY="infra-state/k8s-key.pem"
-           chmod 600 $KEY
+          FIRST_NODE=$(head -n1 infra-state/instance_ips.txt)
 
-           FIRST_NODE=$(head -n1 infra-state/instance_ips.txt)
+          echo "[INFO] Copying manifests to $FIRST_NODE"
+          scp -o StrictHostKeyChecking=no -i $KEY -r ./k8s-manifests ubuntu@$FIRST_NODE:/home/ubuntu/k8s-manifests
 
-           echo "[INFO] Copying manifests to $FIRST_NODE"
-           scp -o StrictHostKeyChecking=no -i $KEY -r ./k8s ubuntu@$FIRST_NODE:/home/ubuntu/k8s
+          echo "[INFO] Applying manifests after readiness check"
+          ssh -o StrictHostKeyChecking=no -i $KEY ubuntu@$FIRST_NODE "
+            # Add ubuntu to microk8s group & fix kube permissions
+            sudo usermod -a -G microk8s ubuntu
+            sudo mkdir -p /home/ubuntu/.kube
+            sudo chown -R ubuntu /home/ubuntu/.kube
 
-           echo "[INFO] Applying manifests using sudo microk8s kubectl"
-           ssh -o StrictHostKeyChecking=no -i $KEY ubuntu@$FIRST_NODE "
-           sudo microk8s kubectl apply -f /home/ubuntu/k8s/
-           "
+            # Wait until microk8s is ready
+            echo '[INFO] Waiting for MicroK8s to be ready...'
+            sudo microk8s status --wait-ready
+
+            # Setup kubeconfig
+            sudo microk8s config > /home/ubuntu/.kube/config
+            sudo chown ubuntu:ubuntu /home/ubuntu/.kube/config
+
+            # Export kubeconfig and deploy
+            export KUBECONFIG=/home/ubuntu/.kube/config
+            kubectl apply -f /home/ubuntu/k8s-manifests/
+          "
