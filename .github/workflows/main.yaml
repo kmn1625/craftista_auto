@@ -27,7 +27,9 @@ jobs:
   provision_infra:
     name: Provision Infra
     runs-on: ubuntu-latest
-    if: contains(github.event.head_commit.message, '[infra]') || github.event_name == 'workflow_dispatch'
+    if: |
+      contains(join(github.event.commits.*.modified, ' '), 'infra/') ||
+      github.event_name == 'workflow_dispatch'
     steps:
       - name: Checkout Repo
         uses: actions/checkout@v4
@@ -50,14 +52,14 @@ jobs:
           terraform init
           terraform apply -auto-approve
 
-      - name: Extract Terraform Outputs or Fallback
+      - name: Extract Outputs or Fallback
         run: |
           cd infra
           echo "[INFO] Extracting Terraform outputs..."
           OUTPUT=$(terraform output -json || echo "")
 
           if [ -z "$OUTPUT" ] || ! echo "$OUTPUT" | jq empty >/dev/null 2>&1; then
-            echo "[WARN] Terraform outputs invalid or empty. Using AWS CLI..."
+            echo "[WARN] Terraform outputs invalid. Using AWS CLI fallback..."
             pip install awscli --quiet
             INSTANCE_IPS=$(aws ec2 describe-instances \
               --filters "Name=tag:Name,Values=k8s-*" \
@@ -76,10 +78,7 @@ jobs:
             chmod 600 k8s-key.pem
           fi
 
-          echo "[INFO] Final IPs:"
-          cat instance_ips.txt
-
-      - name: Push State to Branch
+      - name: Push Infra State to Branch
         run: |
           git config --global user.email "actions@github.com"
           git config --global user.name "GitHub Actions"
@@ -97,9 +96,13 @@ jobs:
   build_docker:
     name: Build & Push Docker Images
     runs-on: ubuntu-latest
-    needs: provision_infra
+    needs: [provision_infra]
     if: |
-      always() && (contains(github.event.head_commit.message, '[docker]') || github.event_name == 'workflow_dispatch')
+      contains(join(github.event.commits.*.modified, ' '), 'frontend/') ||
+      contains(join(github.event.commits.*.modified, ' '), 'catalogue/') ||
+      contains(join(github.event.commits.*.modified, ' '), 'voting/') ||
+      contains(join(github.event.commits.*.modified, ' '), 'recommendation/') ||
+      github.event_name == 'workflow_dispatch'
     steps:
       - name: Checkout Repo
         uses: actions/checkout@v4
@@ -131,9 +134,10 @@ jobs:
   deploy_k8s:
     name: Deploy to Kubernetes
     runs-on: ubuntu-latest
-    needs: build_docker
+    needs: [build_docker]
     if: |
-      always() && (contains(github.event.head_commit.message, '[k8s]') || github.event_name == 'workflow_dispatch')
+      contains(join(github.event.commits.*.modified, ' '), 'k8s/') ||
+      github.event_name == 'workflow_dispatch'
     steps:
       - name: Checkout Repo
         uses: actions/checkout@v4
@@ -145,23 +149,17 @@ jobs:
           echo "[INFO] Files restored:"
           ls -l infra-state
 
-      - name: SSH into Node & Setup MicroK8s
+      - name: Copy Manifests and Deploy with sudo
         run: |
           IPS=$(cat infra-state/instance_ips.txt)
           KEY="infra-state/k8s-key.pem"
           chmod 600 $KEY
-          for ip in $IPS; do
-            ssh -o StrictHostKeyChecking=no -i $KEY ubuntu@$ip "
-              sudo usermod -a -G microk8s ubuntu && sudo chown -R ubuntu ~/.kube && newgrp microk8s;
-              sudo snap install microk8s --classic --channel=1.32/stable;
-              sudo microk8s status --wait-ready;
-            "
-          done
 
-      - name: Deploy Manifests
-        run: |
-          IPS=$(cat infra-state/instance_ips.txt)
-          KEY="infra-state/k8s-key.pem"
-          ssh -o StrictHostKeyChecking=no -i $KEY ubuntu@$(head -n1 infra-state/instance_ips.txt) "
-            microk8s kubectl apply -f /home/ubuntu/k8s/
+          # Copy manifests to first node
+          FIRST_NODE=$(head -n1 infra-state/instance_ips.txt)
+          scp -o StrictHostKeyChecking=no -i $KEY -r ./k8s ubuntu@$FIRST_NODE:/home/ubuntu/k8s
+
+          # Apply with sudo microk8s kubectl
+          ssh -o StrictHostKeyChecking=no -i $KEY ubuntu@$FIRST_NODE "
+            sudo microk8s kubectl apply -f /home/ubuntu/k8s/
           "
