@@ -22,7 +22,7 @@ env:
 
 jobs:
   # ======================================
-  # 1. Provision Infrastructure (Terraform)
+  # 1. Provision Infrastructure
   # ======================================
   provision_infra:
     name: Provision Infra
@@ -129,7 +129,7 @@ jobs:
           docker push $REGISTRY:recommendation-latest
 
   # ======================================
-  # 3. Deploy to Kubernetes with Fixes
+  # 3. Deploy to Kubernetes
   # ======================================
   deploy_k8s:
     name: Deploy to Kubernetes
@@ -149,7 +149,7 @@ jobs:
           echo "[INFO] Files restored:"
           ls -l infra-state
 
-      - name: Deploy Manifests with Readiness Check & Permission Fix
+      - name: Install MicroK8s and Deploy
         run: |
           IPS=$(cat infra-state/instance_ips.txt)
           KEY="infra-state/k8s-key.pem"
@@ -160,22 +160,32 @@ jobs:
           echo "[INFO] Copying manifests to $FIRST_NODE"
           scp -o StrictHostKeyChecking=no -i $KEY -r ./k8s-manifests ubuntu@$FIRST_NODE:/home/ubuntu/k8s-manifests
 
-          echo "[INFO] Applying manifests after readiness check"
+          echo "[INFO] Installing MicroK8s & deploying"
           ssh -o StrictHostKeyChecking=no -i $KEY ubuntu@$FIRST_NODE "
-            # Add ubuntu to microk8s group & fix kube permissions
+            # Install MicroK8s if not installed
+            if ! command -v microk8s &> /dev/null; then
+              echo '[INFO] Installing MicroK8s...'
+              sudo snap install microk8s --classic --channel=1.32/stable
+            fi
+
+            # Ensure group exists and add user
+            sudo groupadd -f microk8s
             sudo usermod -a -G microk8s ubuntu
             sudo mkdir -p /home/ubuntu/.kube
             sudo chown -R ubuntu /home/ubuntu/.kube
 
-            # Wait until microk8s is ready
+            # Wait for MicroK8s to be ready
             echo '[INFO] Waiting for MicroK8s to be ready...'
             sudo microk8s status --wait-ready
 
-            # Setup kubeconfig
+            # Enable DNS and storage
+            sudo microk8s enable dns storage
+
+            # Configure kubeconfig
             sudo microk8s config > /home/ubuntu/.kube/config
             sudo chown ubuntu:ubuntu /home/ubuntu/.kube/config
 
-            # Export kubeconfig and deploy
+            # Deploy manifests
             export KUBECONFIG=/home/ubuntu/.kube/config
-            kubectl apply -f /home/ubuntu/k8s-manifests/
+            sudo microk8s kubectl apply -f /home/ubuntu/k8s-manifests/
           "
