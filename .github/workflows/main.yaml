@@ -144,22 +144,32 @@ jobs:
 
       - name: Restore Infra State
         run: |
-          git fetch origin infra-state
-          git restore --source=origin/infra-state infra-state/
-          echo "[INFO] Files restored:"
-          ls -l infra-state
+           git fetch origin infra-state
+           git restore --source=origin/infra-state infra-state/
+           echo "[INFO] Files restored:"
+           ls -l infra-state
+
+      - name: Verify k8s directory exists
+        run: |
+          if [ ! -d "./k8s" ]; then
+          echo "[ERROR] The ./k8s directory does not exist in the repository."
+          exit 1
+          fi
+          echo "[INFO] Found k8s manifests:"
+          ls -l ./k8s
 
       - name: Copy Manifests and Deploy with sudo
         run: |
-          IPS=$(cat infra-state/instance_ips.txt)
-          KEY="infra-state/k8s-key.pem"
-          chmod 600 $KEY
+           IPS=$(cat infra-state/instance_ips.txt)
+           KEY="infra-state/k8s-key.pem"
+           chmod 600 $KEY
 
-          # Copy manifests to first node
-          FIRST_NODE=$(head -n1 infra-state/instance_ips.txt)
-          scp -o StrictHostKeyChecking=no -i $KEY -r ./k8s ubuntu@$FIRST_NODE:/home/ubuntu/k8s
+           FIRST_NODE=$(head -n1 infra-state/instance_ips.txt)
 
-          # Apply with sudo microk8s kubectl
-          ssh -o StrictHostKeyChecking=no -i $KEY ubuntu@$FIRST_NODE "
-            sudo microk8s kubectl apply -f /home/ubuntu/k8s/
-          "
+           echo "[INFO] Copying manifests to $FIRST_NODE"
+           scp -o StrictHostKeyChecking=no -i $KEY -r ./k8s ubuntu@$FIRST_NODE:/home/ubuntu/k8s
+
+           echo "[INFO] Applying manifests using sudo microk8s kubectl"
+           ssh -o StrictHostKeyChecking=no -i $KEY ubuntu@$FIRST_NODE "
+           sudo microk8s kubectl apply -f /home/ubuntu/k8s/
+           "
