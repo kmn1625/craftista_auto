@@ -149,43 +149,60 @@ jobs:
           echo "[INFO] Files restored:"
           ls -l infra-state
 
-      - name: Install MicroK8s and Deploy
+      - name: Verify Key and IPs Exist
         run: |
-          IPS=$(cat infra-state/instance_ips.txt)
-          KEY="infra-state/k8s-key.pem"
-          chmod 600 $KEY
+          if [ ! -f infra-state/k8s-key.pem ]; then
+            echo "[ERROR] SSH key missing. Cannot deploy!"
+            exit 1
+          fi
+          if [ ! -f infra-state/instance_ips.txt ]; then
+            echo "[ERROR] Instance IPs missing. Cannot deploy!"
+            exit 1
+          fi
 
+      - name: Deploy to MicroK8s with Retry
+        run: |
+          KEY="$GITHUB_WORKSPACE/infra-state/k8s-key.pem"
+          chmod 600 "$KEY"
           FIRST_NODE=$(head -n1 infra-state/instance_ips.txt)
 
           echo "[INFO] Copying manifests to $FIRST_NODE"
-          scp -o StrictHostKeyChecking=no -i $KEY -r ./k8s-manifests ubuntu@$FIRST_NODE:/home/ubuntu/k8s-manifests
+          n=0
+          until [ $n -ge 3 ]
+          do
+            scp -o StrictHostKeyChecking=no -i "$KEY" -r ./k8s-manifests ubuntu@$FIRST_NODE:/home/ubuntu/k8s-manifests && break
+            n=$((n+1))
+            echo "[WARN] SCP failed. Retrying in 10s... ($n/3)"
+            sleep 10
+          done
 
           echo "[INFO] Installing MicroK8s & deploying"
-          ssh -o StrictHostKeyChecking=no -i $KEY ubuntu@$FIRST_NODE "
-            # Install MicroK8s if not installed
-            if ! command -v microk8s &> /dev/null; then
-              echo '[INFO] Installing MicroK8s...'
-              sudo snap install microk8s --classic --channel=1.32/stable
-            fi
+          n=0
+          until [ $n -ge 3 ]
+          do
+            ssh -o StrictHostKeyChecking=no -i "$KEY" ubuntu@$FIRST_NODE "
+              if ! command -v microk8s &> /dev/null; then
+                echo '[INFO] Installing MicroK8s...'
+                sudo snap install microk8s --classic --channel=1.32/stable
+              fi
 
-            # Ensure group exists and add user
-            sudo groupadd -f microk8s
-            sudo usermod -a -G microk8s ubuntu
-            sudo mkdir -p /home/ubuntu/.kube
-            sudo chown -R ubuntu /home/ubuntu/.kube
+              sudo groupadd -f microk8s
+              sudo usermod -a -G microk8s ubuntu
+              sudo mkdir -p /home/ubuntu/.kube
+              sudo chown -R ubuntu /home/ubuntu/.kube
 
-            # Wait for MicroK8s to be ready
-            echo '[INFO] Waiting for MicroK8s to be ready...'
-            sudo microk8s status --wait-ready
+              echo '[INFO] Waiting for MicroK8s to be ready...'
+              sudo microk8s status --wait-ready
 
-            # Enable DNS and storage
-            sudo microk8s enable dns storage
+              sudo microk8s enable dns storage
 
-            # Configure kubeconfig
-            sudo microk8s config > /home/ubuntu/.kube/config
-            sudo chown ubuntu:ubuntu /home/ubuntu/.kube/config
+              sudo microk8s config > /home/ubuntu/.kube/config
+              sudo chown ubuntu:ubuntu /home/ubuntu/.kube/config
 
-            # Deploy manifests
-            export KUBECONFIG=/home/ubuntu/.kube/config
-            sudo microk8s kubectl apply -f /home/ubuntu/k8s-manifests/
-          "
+              export KUBECONFIG=/home/ubuntu/.kube/config
+              sudo microk8s kubectl apply -f /home/ubuntu/k8s-manifests/
+            " && break
+            n=$((n+1))
+            echo "[WARN] SSH deployment failed. Retrying in 15s... ($n/3)"
+            sleep 15
+          done
