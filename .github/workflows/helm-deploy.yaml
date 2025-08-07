@@ -1,0 +1,45 @@
+name: Helm Deploy to Kubernetes
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v3
+
+      - name: Read IP and set SSH
+        run: |
+          IPS=$(cat infra-state/instance_ips.txt)
+          KEY="infra-state/k8s-key.pem"
+          chmod 600 $KEY
+          FIRST_NODE=$(head -n1 infra-state/instance_ips.txt)
+          echo "FIRST_NODE=$FIRST_NODE" >> $GITHUB_ENV
+
+      - name: Copy Helm charts to master node
+        run: |
+          scp -o StrictHostKeyChecking=no -i infra-state/k8s-key.pem -r ./helm-charts ubuntu@${{ env.FIRST_NODE }}:/home/ubuntu/helm-charts
+
+      - name: Deploy using Helm
+        run: |
+          ssh -o StrictHostKeyChecking=no -i infra-state/k8s-key.pem ubuntu@${{ env.FIRST_NODE }} "
+            # Helm install per service
+            sudo snap install helm --classic || true
+
+            sudo microk8s status --wait-ready
+            sudo microk8s enable dns storage
+
+            export KUBECONFIG=/home/ubuntu/.kube/config
+
+            cd /home/ubuntu/helm-charts
+
+            for chart in catalogue recommendation voting frontend; do
+              echo '[INFO] Deploying chart:' \$chart
+              sudo microk8s helm upgrade --install \$chart ./\$chart --wait --timeout 3m
+            done
+
+            echo '[INFO] Verifying Pods status'
+            sudo microk8s kubectl get pods -A
+          "
