@@ -1,0 +1,6 @@
+image:
+  repository: kmn1624/recommendation
+  tag: latest
+
+service:
+  port: 6000
