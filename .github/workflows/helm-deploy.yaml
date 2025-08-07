@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # ✅ Checkout main branch (has the Helm charts)
+      # ✅ Checkout main branch (for helm-charts folder)
       - name: ✅ Checkout main branch
         uses: actions/checkout@v3
         with:
@@ -34,7 +34,7 @@ jobs:
         run: |
           mv infra-tmp/infra-state ./infra-state
 
-      # ✅ Read the master IP
+      # ✅ Extract master node IP
       - name: ✅ Extract master node IP
         run: |
           KEY="infra-state/k8s-key.pem"
@@ -42,38 +42,37 @@ jobs:
           FIRST_NODE=$(head -n1 infra-state/instance_ips.txt)
           echo "FIRST_NODE=$FIRST_NODE" >> $GITHUB_ENV
 
-      # ✅ Ensure Helm folder is present
-      - name: ✅ Check if helm directory exists
+      # ✅ Check if helm-charts directory exists
+      - name: ✅ Check if helm-charts directory exists
         run: |
           if [ ! -d "helm-charts" ]; then
-            echo "❌ 'helm-charts/' directory not found!"
-            echo "Make sure it exists in the main branch."
+            echo "❌ 'helm-charts/' directory not found in main branch!"
             exit 1
           fi
 
       # ✅ Copy Helm charts to master node
-      - name: ✅ Copy Helm charts to master
+      - name: ✅ Copy Helm charts to master node
         run: |
           echo "[INFO] Copying Helm charts to $FIRST_NODE"
-          scp -o StrictHostKeyChecking=no -i infra-state/k8s-key.pem -r helm-charts ubuntu@$FIRST_NODE:/home/ubuntu/helm
+          scp -o StrictHostKeyChecking=no -i infra-state/k8s-key.pem -r helm-charts ubuntu@$FIRST_NODE:/home/ubuntu/helm-charts
 
       # ✅ Deploy using Helm
       - name: ✅ Deploy with Helm
         run: |
           ssh -o StrictHostKeyChecking=no -i infra-state/k8s-key.pem ubuntu@$FIRST_NODE "
-            echo '[INFO] Installing Helm if not present...'
+            echo '[INFO] Installing Helm if not already installed...'
             if ! command -v helm &> /dev/null; then
               sudo snap install helm --classic
             fi
 
-            echo '[INFO] Deploying charts...'
-            cd /home/ubuntu/helm
+            echo '[INFO] Deploying Helm charts...'
+            cd /home/ubuntu/helm-charts
 
             for svc in catalogue frontend recommendation voting; do
               if [ -d \"\$svc\" ]; then
                 helm upgrade --install \$svc ./\$svc
               else
-                echo \"⚠️ Chart folder \$svc not found, skipping\"
+                echo \"⚠️ Chart folder \$svc not found inside helm-charts/, skipping...\"
               fi
             done
 
