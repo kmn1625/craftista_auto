@@ -55,7 +55,7 @@ jobs:
       - name: ✅ Copy Helm charts to master
         run: |
           echo "[INFO] Copying Helm charts to $FIRST_NODE"
-          scp -o StrictHostKeyChecking=no -i infra-state/k8s-key.pem -r helm ubuntu@$FIRST_NODE:/home/ubuntu/helm
+          scp -o StrictHostKeyChecking=no -i infra-state/k8s-key.pem -r helm-charts ubuntu@$FIRST_NODE:/home/ubuntu/helm
 
       # ✅ Deploy using Helm
       - name: ✅ Deploy with Helm
