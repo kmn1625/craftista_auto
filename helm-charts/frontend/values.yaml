@@ -1,0 +1,6 @@
+image:
+  repository: kmn1624/frontend
+  tag: latest
+
+service:
+  port: 3000
