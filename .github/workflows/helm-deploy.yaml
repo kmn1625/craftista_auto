@@ -1,16 +1,35 @@
-name: Helm Deploy to Kubernetes
+name: Deploy with Helm
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
 
 jobs:
-  deploy:
+  helm-deploy:
+    name: Deploy Microservices via Helm
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout repo
+      - name: ✅ Checkout current branch (main)
         uses: actions/checkout@v3
 
-      - name: Read IP and set SSH
+      - name: ✅ Checkout `infra-state` folder from `infra-state` branch
+        uses: actions/checkout@v3
+        with:
+          repository: ${{ github.repository }}
+          ref: infra-state
+          path: infra-tmp
+          sparse-checkout: |
+            infra-state/
+          sparse-checkout-cone-mode: false
+
+      - name: ✅ Move infra-state files to root
+        run: |
+          mv infra-tmp/infra-state ./infra-state
+
+      - name: ✅ Extract first master node IP
         run: |
           IPS=$(cat infra-state/instance_ips.txt)
           KEY="infra-state/k8s-key.pem"
@@ -18,26 +37,28 @@ jobs:
           FIRST_NODE=$(head -n1 infra-state/instance_ips.txt)
           echo "FIRST_NODE=$FIRST_NODE" >> $GITHUB_ENV
 
-      - name: Copy Helm charts to master node
+      - name: ✅ Copy Helm charts to master node
         run: |
-          scp -o StrictHostKeyChecking=no -i infra-state/k8s-key.pem -r ./helm-charts ubuntu@${{ env.FIRST_NODE }}:/home/ubuntu/helm-charts
+          echo "[INFO] Copying Helm charts to $FIRST_NODE"
+          scp -o StrictHostKeyChecking=no -i infra-state/k8s-key.pem -r helm ubuntu@$FIRST_NODE:/home/ubuntu/helm
 
-      - name: Deploy using Helm
+      - name: ✅ Deploy Helm charts
         run: |
-          ssh -o StrictHostKeyChecking=no -i infra-state/k8s-key.pem ubuntu@${{ env.FIRST_NODE }} "
-            sudo snap install helm --classic || true
-            sudo microk8s status --wait-ready
-            sudo microk8s enable dns storage
+          ssh -o StrictHostKeyChecking=no -i infra-state/k8s-key.pem ubuntu@$FIRST_NODE "
+            echo '[INFO] Installing Helm if not present...'
+            if ! command -v helm &> /dev/null; then
+              sudo snap install helm --classic
+            fi
 
-            export KUBECONFIG=/home/ubuntu/.kube/config
-            cd /home/ubuntu/helm-charts
-
-            for chart in catalogue recommendation voting frontend; do
-              echo '[INFO] Deploying chart:' \$chart
-              sudo microk8s helm upgrade --install \$chart ./\$chart --wait --timeout 3m
+            echo '[INFO] Deploying microservices using Helm...'
+            cd /home/ubuntu/helm
+            for chart in catalogue frontend recommendation voting; do
+              helm upgrade --install \$chart ./\$chart
             done
 
-            echo '[INFO] Verifying Pods status'
-            sudo microk8s kubectl get pods -A
-            sudo microk8s kubectl get svc -A
+            echo '[INFO] Waiting for pods to be ready...'
+            sleep 10
+            kubectl get pods -A
           "
+        env:
+          FIRST_NODE: ${{ env.FIRST_NODE }}
