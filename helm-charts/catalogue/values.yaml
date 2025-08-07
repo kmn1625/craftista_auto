@@ -1,0 +1,6 @@
+image:
+  repository: kmn1624/catalogue
+  tag: latest
+
+service:
+  port: 5000
