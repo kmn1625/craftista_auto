@@ -25,14 +25,11 @@ jobs:
       - name: Deploy using Helm
         run: |
           ssh -o StrictHostKeyChecking=no -i infra-state/k8s-key.pem ubuntu@${{ env.FIRST_NODE }} "
-            # Helm install per service
             sudo snap install helm --classic || true
-
             sudo microk8s status --wait-ready
             sudo microk8s enable dns storage
 
             export KUBECONFIG=/home/ubuntu/.kube/config
-
             cd /home/ubuntu/helm-charts
 
             for chart in catalogue recommendation voting frontend; do
@@ -42,4 +39,5 @@ jobs:
 
             echo '[INFO] Verifying Pods status'
             sudo microk8s kubectl get pods -A
+            sudo microk8s kubectl get svc -A
           "
