@@ -45,8 +45,8 @@ jobs:
       # ✅ Ensure Helm folder is present
       - name: ✅ Check if helm directory exists
         run: |
-          if [ ! -d "helm" ]; then
-            echo "❌ 'helm/' directory not found!"
+          if [ ! -d "helm-charts" ]; then
+            echo "❌ 'helm-charts/' directory not found!"
             echo "Make sure it exists in the main branch."
             exit 1
           fi
